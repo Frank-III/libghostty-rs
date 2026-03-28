@@ -5,10 +5,15 @@
 #![allow(rustdoc::all)]
 
 mod bindings;
+mod patched;
 
 use std::ops::Deref;
 
 pub use bindings::*;
+pub use patched::*;
+
+/// Ghostty commit pinned by the vendored build.
+pub const GHOSTTY_COMMIT: &str = env!("LIBGHOSTTY_VT_GHOSTTY_COMMIT");
 
 /// Initialize a "sized" FFI object.
 #[macro_export]
@@ -47,6 +52,7 @@ impl bindings::String {
 
 /// Canonical list of exported `libghostty-vt` C functions represented by checked-in bindings.
 pub const EXPORTED_API_SYMBOLS: &[&str] = &[
+    "ghostty_alloc",
     "ghostty_build_info",
     "ghostty_cell_get",
     "ghostty_color_rgb_get",
@@ -55,6 +61,7 @@ pub const EXPORTED_API_SYMBOLS: &[&str] = &[
     "ghostty_formatter_format_buf",
     "ghostty_formatter_free",
     "ghostty_formatter_terminal_new",
+    "ghostty_free",
     "ghostty_grid_ref_cell",
     "ghostty_grid_ref_graphemes",
     "ghostty_grid_ref_row",
@@ -138,12 +145,16 @@ pub const EXPORTED_API_SYMBOLS: &[&str] = &[
     "ghostty_terminal_free",
     "ghostty_terminal_get",
     "ghostty_terminal_grid_ref",
+    "ghostty_terminal_hyperlink_uri_at",
     "ghostty_terminal_mode_get",
     "ghostty_terminal_mode_set",
     "ghostty_terminal_new",
     "ghostty_terminal_reset",
     "ghostty_terminal_resize",
     "ghostty_terminal_scroll_viewport",
+    "ghostty_terminal_search_matches",
+    "ghostty_terminal_selection_string",
+    "ghostty_terminal_set",
     "ghostty_terminal_vt_write",
 ];
 
@@ -170,55 +181,12 @@ mod tests {
             .collect()
     }
 
-    fn parse_header_symbols(input: &str) -> BTreeSet<String> {
-        let mut symbols = BTreeSet::new();
-        let mut statement = String::new();
-
-        for line in input.lines() {
-            let trimmed = line.trim();
-
-            if trimmed.starts_with('#') || trimmed.starts_with("//") || trimmed.is_empty() {
-                continue;
-            }
-
-            // Skip static inline functions (they are inlined, not exported symbols)
-            if trimmed.starts_with("static") {
-                continue;
-            }
-
-            if !statement.is_empty() {
-                statement.push(' ');
-            }
-            statement.push_str(trimmed);
-
-            if !trimmed.ends_with(';') && !trimmed.ends_with('{') {
-                continue;
-            }
-
-            if let Some(end) = statement.find('(') {
-                let before_paren = &statement[..end];
-                if let Some(candidate) = before_paren.split_whitespace().last() {
-                    // Strip leading * for pointer-returning functions
-                    let candidate = candidate.trim_start_matches('*');
-                    if candidate.starts_with("ghostty_")
-                        && candidate
-                            .chars()
-                            .all(|char| char.is_ascii_alphanumeric() || char == '_')
-                    {
-                        symbols.insert(candidate.to_owned());
-                    }
-                }
-            }
-
-            statement.clear();
-        }
-
-        symbols
-    }
-
     #[test]
     fn exported_manifest_matches_bindings() {
-        let from_bindings = parse_binding_symbols(include_str!("bindings.rs"));
+        let from_bindings = parse_binding_symbols(include_str!("bindings.rs"))
+            .into_iter()
+            .chain(parse_binding_symbols(include_str!("patched.rs")))
+            .collect::<BTreeSet<_>>();
         let from_manifest: BTreeSet<String> = EXPORTED_API_SYMBOLS
             .iter()
             .map(|symbol| (*symbol).to_owned())

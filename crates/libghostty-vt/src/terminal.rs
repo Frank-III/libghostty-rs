@@ -4,7 +4,7 @@ use std::{marker::PhantomData, mem::MaybeUninit};
 
 use crate::{
     alloc::{Allocator, Object},
-    error::{Error, Result, from_optional_result, from_result},
+    error::{Error, Result, from_optional_result, from_result, from_result_with_len},
     ffi::{self, TerminalData as Data, TerminalOption as Opt},
     key,
     screen::GridRef,
@@ -452,6 +452,169 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             v.map(|v| v.map(ffi::ColorRgb::from)).as_ref(),
         )
     }
+
+    /// Search the active screen and scrollback for a UTF-8 needle.
+    pub fn search_matches(&self, needle: &str) -> Result<Vec<SearchMatch>> {
+        if needle.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut required = 0usize;
+        match from_result_with_len(
+            unsafe {
+                ffi::ghostty_terminal_search_matches(
+                    self.inner.as_raw(),
+                    needle.as_ptr(),
+                    needle.len(),
+                    std::ptr::null_mut(),
+                    0,
+                    &raw mut required,
+                )
+            },
+            required,
+        ) {
+            Ok(len) => required = len,
+            Err(Error::OutOfSpace { required: needed }) => required = needed,
+            Err(error) => return Err(error),
+        }
+
+        if required == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut matches = vec![ffi::GhosttyTerminalSearchMatch::default(); required];
+        let len = from_result_with_len(
+            unsafe {
+                ffi::ghostty_terminal_search_matches(
+                    self.inner.as_raw(),
+                    needle.as_ptr(),
+                    needle.len(),
+                    matches.as_mut_ptr(),
+                    matches.len(),
+                    &raw mut required,
+                )
+            },
+            required,
+        )?;
+        matches.truncate(len);
+
+        Ok(matches
+            .into_iter()
+            .map(|entry| SearchMatch {
+                start: PointCoordinate::new(entry.start_x, entry.start_y),
+                end: PointCoordinate::new(entry.end_x, entry.end_y),
+            })
+            .collect())
+    }
+
+    /// Read the selected text between two points on the active screen.
+    pub fn selection_string(
+        &self,
+        start: SelectionPoint,
+        end: SelectionPoint,
+        rectangle: bool,
+        trim: bool,
+    ) -> Result<String> {
+        let mut required = 0usize;
+        let (start_active, start_coord) = start.into_raw_parts();
+        let (end_active, end_coord) = end.into_raw_parts();
+
+        match from_result_with_len(
+            unsafe {
+                ffi::ghostty_terminal_selection_string(
+                    self.inner.as_raw(),
+                    start_active,
+                    start_coord.x,
+                    start_coord.y,
+                    end_active,
+                    end_coord.x,
+                    end_coord.y,
+                    rectangle,
+                    trim,
+                    std::ptr::null_mut(),
+                    0,
+                    &raw mut required,
+                )
+            },
+            required,
+        ) {
+            Ok(len) => required = len,
+            Err(Error::OutOfSpace { required: needed }) => required = needed,
+            Err(error) => return Err(error),
+        }
+
+        if required == 0 {
+            return Ok(String::new());
+        }
+
+        let mut bytes = vec![0u8; required];
+        let len = from_result_with_len(
+            unsafe {
+                ffi::ghostty_terminal_selection_string(
+                    self.inner.as_raw(),
+                    start_active,
+                    start_coord.x,
+                    start_coord.y,
+                    end_active,
+                    end_coord.x,
+                    end_coord.y,
+                    rectangle,
+                    trim,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &raw mut required,
+                )
+            },
+            required,
+        )?;
+        bytes.truncate(len);
+        String::from_utf8(bytes).map_err(|_| Error::InvalidValue)
+    }
+
+    /// Read the hyperlink URI associated with a screen coordinate.
+    pub fn hyperlink_uri_at_screen(&self, point: PointCoordinate) -> Result<Option<String>> {
+        let mut required = 0usize;
+        match from_result_with_len(
+            unsafe {
+                ffi::ghostty_terminal_hyperlink_uri_at(
+                    self.inner.as_raw(),
+                    point.x,
+                    point.y,
+                    std::ptr::null_mut(),
+                    0,
+                    &raw mut required,
+                )
+            },
+            required,
+        ) {
+            Ok(len) => required = len,
+            Err(Error::OutOfSpace { required: needed }) => required = needed,
+            Err(error) => return Err(error),
+        }
+
+        if required == 0 {
+            return Ok(None);
+        }
+
+        let mut bytes = vec![0u8; required];
+        let len = from_result_with_len(
+            unsafe {
+                ffi::ghostty_terminal_hyperlink_uri_at(
+                    self.inner.as_raw(),
+                    point.x,
+                    point.y,
+                    bytes.as_mut_ptr(),
+                    bytes.len(),
+                    &raw mut required,
+                )
+            },
+            required,
+        )?;
+        bytes.truncate(len);
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| Error::InvalidValue)
+    }
 }
 
 impl Drop for Terminal<'_, '_> {
@@ -512,16 +675,65 @@ pub struct PointCoordinate {
     /// Row (0-indexed). May exceed page size for screen/history tags.
     pub y: u32,
 }
+
+impl PointCoordinate {
+    /// Create a point coordinate from a column and row.
+    #[must_use]
+    pub const fn new(x: u16, y: u32) -> Self {
+        Self { x, y }
+    }
+
+    /// Get the column.
+    #[must_use]
+    pub const fn x(self) -> u16 {
+        self.x
+    }
+
+    /// Get the row.
+    #[must_use]
+    pub const fn y(self) -> u32 {
+        self.y
+    }
+}
+
 impl From<PointCoordinate> for ffi::PointCoordinate {
     fn from(value: PointCoordinate) -> Self {
         let PointCoordinate { x, y } = value;
         Self { x, y }
     }
 }
+
 impl From<ffi::PointCoordinate> for PointCoordinate {
     fn from(value: ffi::PointCoordinate) -> Self {
         let ffi::PointCoordinate { x, y } = value;
         Self { x, y }
+    }
+}
+
+/// Search match in terminal screen coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SearchMatch {
+    /// Match start position.
+    pub start: PointCoordinate,
+    /// Match end position.
+    pub end: PointCoordinate,
+}
+
+/// Selection endpoint used by [`Terminal::selection_string`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectionPoint {
+    /// Point within the active terminal area.
+    Active(PointCoordinate),
+    /// Point within full screen coordinates including scrollback.
+    Screen(PointCoordinate),
+}
+
+impl SelectionPoint {
+    fn into_raw_parts(self) -> (bool, PointCoordinate) {
+        match self {
+            Self::Active(point) => (true, point),
+            Self::Screen(point) => (false, point),
+        }
     }
 }
 
@@ -555,6 +767,59 @@ impl From<ScrollViewport> for ffi::TerminalScrollViewport {
                 },
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Options, PointCoordinate, SelectionPoint, Terminal};
+
+    fn build_terminal() -> Terminal<'static, 'static> {
+        Terminal::new(Options {
+            cols: 20,
+            rows: 4,
+            max_scrollback: 1024,
+        })
+        .expect("create terminal")
+    }
+
+    #[test]
+    fn search_matches_find_repeated_text() {
+        let mut terminal = build_terminal();
+        terminal.vt_write(b"alpha\r\nbeta\r\nalpha\r\n");
+
+        let mut matches = terminal.search_matches("alpha").expect("search matches");
+        matches.sort_by_key(|entry| (entry.start.y(), entry.start.x()));
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].start, PointCoordinate::new(0, 0));
+        assert_eq!(matches[1].start, PointCoordinate::new(0, 2));
+    }
+
+    #[test]
+    fn selection_string_reads_active_text() {
+        let mut terminal = build_terminal();
+        terminal.vt_write(b"alpha\r\nbeta\r\n");
+
+        let selection = terminal
+            .selection_string(
+                SelectionPoint::Active(PointCoordinate::new(0, 0)),
+                SelectionPoint::Active(PointCoordinate::new(4, 0)),
+                false,
+                false,
+            )
+            .expect("selection string");
+        assert_eq!(selection, "alpha");
+    }
+
+    #[test]
+    fn hyperlink_uri_at_screen_reads_osc8_link() {
+        let mut terminal = build_terminal();
+        terminal.vt_write(b"\x1b]8;;https://example.com\x1b\\\\go\x1b]8;;\x1b\\\\");
+
+        let uri = terminal
+            .hyperlink_uri_at_screen(PointCoordinate::new(0, 0))
+            .expect("hyperlink query");
+        assert_eq!(uri.as_deref(), Some("https://example.com"));
     }
 }
 

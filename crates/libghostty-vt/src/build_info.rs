@@ -30,6 +30,9 @@ use crate::{
     ffi::{self, BuildInfo as Info},
 };
 
+/// Ghostty commit pinned by the vendored build.
+pub const GHOSTTY_COMMIT: &str = ffi::GHOSTTY_COMMIT;
+
 /// Whether SIMD-accelerated code paths are enabled.
 pub fn supports_simd() -> Result<bool> {
     build_info(Info::SIMD)
