@@ -11,6 +11,7 @@ use std::{cell::RefCell, rc::Rc};
 use libghostty_vt::{
     RenderState as WrapperRenderState, Terminal,
     error::Result,
+    focus, key, mouse,
     render::{CellIterator, Dirty, RowIteration, RowIterator, Snapshot},
     screen::{
         Cell as WrapperCell, CellWide as WrapperCellWide, GridRef, Row as WrapperRow,
@@ -298,6 +299,585 @@ impl RenderSnapshot {
     }
 }
 
+/// Shared terminal input options derived from terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalInputOptions {
+    /// DEC mode 1: cursor key application mode.
+    pub cursor_key_application: bool,
+    /// DEC mode 66: keypad key application mode.
+    pub keypad_key_application: bool,
+    /// DEC mode 1036: alt sends escape prefix.
+    pub alt_esc_prefix: bool,
+    /// Active Kitty keyboard protocol flags.
+    pub kitty_flags: u8,
+    /// Active mouse tracking mode.
+    pub mouse_tracking_mode: MouseTrackingMode,
+    /// Active mouse reporting format.
+    pub mouse_format: MouseFormat,
+}
+
+/// Build shared terminal input options from a wrapper terminal.
+pub fn terminal_input_options(terminal: &Terminal<'_, '_>) -> Result<TerminalInputOptions> {
+    let mode_state = terminal.mode_state()?;
+
+    Ok(TerminalInputOptions {
+        cursor_key_application: mode_state.app_cursor,
+        keypad_key_application: mode_state.app_keypad,
+        alt_esc_prefix: terminal.mode(libghostty_vt::terminal::Mode::ALT_ESC_PREFIX)?,
+        kitty_flags: terminal.kitty_keyboard_flags()?.bits(),
+        mouse_tracking_mode: mouse_tracking_mode_for_terminal(terminal)?,
+        mouse_format: mouse_format_for_terminal(terminal)?,
+    })
+}
+
+/// Ghostty key code for an unidentified key.
+pub const KEY_UNIDENTIFIED: i32 = key::Key::Unidentified as i32;
+/// Ghostty key code for the backquote key.
+pub const KEY_BACKQUOTE: i32 = key::Key::Backquote as i32;
+/// Ghostty key code for the backslash key.
+pub const KEY_BACKSLASH: i32 = key::Key::Backslash as i32;
+/// Ghostty key code for the left bracket key.
+pub const KEY_BRACKET_LEFT: i32 = key::Key::BracketLeft as i32;
+/// Ghostty key code for the right bracket key.
+pub const KEY_BRACKET_RIGHT: i32 = key::Key::BracketRight as i32;
+/// Ghostty key code for the comma key.
+pub const KEY_COMMA: i32 = key::Key::Comma as i32;
+/// Ghostty key code for the `0` digit key.
+pub const KEY_DIGIT_0: i32 = key::Key::Digit0 as i32;
+/// Ghostty key code for the equal key.
+pub const KEY_EQUAL: i32 = key::Key::Equal as i32;
+/// Ghostty key code for the `A` key.
+pub const KEY_A: i32 = key::Key::A as i32;
+/// Ghostty key code for the minus key.
+pub const KEY_MINUS: i32 = key::Key::Minus as i32;
+/// Ghostty key code for the period key.
+pub const KEY_PERIOD: i32 = key::Key::Period as i32;
+/// Ghostty key code for the quote key.
+pub const KEY_QUOTE: i32 = key::Key::Quote as i32;
+/// Ghostty key code for the semicolon key.
+pub const KEY_SEMICOLON: i32 = key::Key::Semicolon as i32;
+/// Ghostty key code for the slash key.
+pub const KEY_SLASH: i32 = key::Key::Slash as i32;
+/// Ghostty key code for the backspace key.
+pub const KEY_BACKSPACE: i32 = key::Key::Backspace as i32;
+/// Ghostty key code for the enter key.
+pub const KEY_ENTER: i32 = key::Key::Enter as i32;
+/// Ghostty key code for the space key.
+pub const KEY_SPACE: i32 = key::Key::Space as i32;
+/// Ghostty key code for the tab key.
+pub const KEY_TAB: i32 = key::Key::Tab as i32;
+/// Ghostty key code for the delete key.
+pub const KEY_DELETE: i32 = key::Key::Delete as i32;
+/// Ghostty key code for the end key.
+pub const KEY_END: i32 = key::Key::End as i32;
+/// Ghostty key code for the home key.
+pub const KEY_HOME: i32 = key::Key::Home as i32;
+/// Ghostty key code for the insert key.
+pub const KEY_INSERT: i32 = key::Key::Insert as i32;
+/// Ghostty key code for the page down key.
+pub const KEY_PAGE_DOWN: i32 = key::Key::PageDown as i32;
+/// Ghostty key code for the page up key.
+pub const KEY_PAGE_UP: i32 = key::Key::PageUp as i32;
+/// Ghostty key code for the down arrow key.
+pub const KEY_ARROW_DOWN: i32 = key::Key::ArrowDown as i32;
+/// Ghostty key code for the left arrow key.
+pub const KEY_ARROW_LEFT: i32 = key::Key::ArrowLeft as i32;
+/// Ghostty key code for the right arrow key.
+pub const KEY_ARROW_RIGHT: i32 = key::Key::ArrowRight as i32;
+/// Ghostty key code for the up arrow key.
+pub const KEY_ARROW_UP: i32 = key::Key::ArrowUp as i32;
+/// Ghostty key code for the escape key.
+pub const KEY_ESCAPE: i32 = key::Key::Escape as i32;
+/// Ghostty key code for the first function key.
+pub const KEY_F1: i32 = key::Key::F1 as i32;
+/// Ghostty key code for the `C` key.
+pub const KEY_C: i32 = key::Key::C as i32;
+
+/// Shift modifier bit.
+pub const MODIFIER_SHIFT: u16 = key::Mods::SHIFT.bits();
+/// Control modifier bit.
+pub const MODIFIER_CONTROL: u16 = key::Mods::CTRL.bits();
+/// Alt modifier bit.
+pub const MODIFIER_ALT: u16 = key::Mods::ALT.bits();
+/// Super/Command/Windows modifier bit.
+pub const MODIFIER_SUPER: u16 = key::Mods::SUPER.bits();
+
+/// Resolve a Ghostty key code from a textual key name.
+#[must_use]
+pub fn key_from_name(name: &str) -> Option<i32> {
+    match name {
+        "tab" => Some(KEY_TAB),
+        "escape" => Some(KEY_ESCAPE),
+        "enter" => Some(KEY_ENTER),
+        "backspace" | "back" => Some(KEY_BACKSPACE),
+        "space" => Some(KEY_SPACE),
+        "home" => Some(KEY_HOME),
+        "end" => Some(KEY_END),
+        "pageup" => Some(KEY_PAGE_UP),
+        "pagedown" => Some(KEY_PAGE_DOWN),
+        "up" => Some(KEY_ARROW_UP),
+        "down" => Some(KEY_ARROW_DOWN),
+        "left" => Some(KEY_ARROW_LEFT),
+        "right" => Some(KEY_ARROW_RIGHT),
+        "insert" => Some(KEY_INSERT),
+        "delete" => Some(KEY_DELETE),
+        _ => {
+            if let Some(function_number) = name
+                .strip_prefix('f')
+                .and_then(|suffix| suffix.parse::<i32>().ok())
+                && (1..=20).contains(&function_number)
+            {
+                return Some(KEY_F1 + function_number - 1);
+            }
+
+            let mut characters = name.chars();
+            let character = match (characters.next(), characters.next()) {
+                (Some(character), None) => character,
+                _ => return None,
+            };
+
+            match character {
+                'a'..='z' => Some(KEY_A + (character as i32 - 'a' as i32)),
+                'A'..='Z' => Some(KEY_A + (character as i32 - 'A' as i32)),
+                '0'..='9' => Some(KEY_DIGIT_0 + (character as i32 - '0' as i32)),
+                '!' => Some(KEY_DIGIT_0 + 1),
+                '@' => Some(KEY_DIGIT_0 + 2),
+                '#' => Some(KEY_DIGIT_0 + 3),
+                '$' => Some(KEY_DIGIT_0 + 4),
+                '%' => Some(KEY_DIGIT_0 + 5),
+                '^' => Some(KEY_DIGIT_0 + 6),
+                '&' => Some(KEY_DIGIT_0 + 7),
+                '*' => Some(KEY_DIGIT_0 + 8),
+                '(' => Some(KEY_DIGIT_0 + 9),
+                ')' => Some(KEY_DIGIT_0),
+                '`' | '~' => Some(KEY_BACKQUOTE),
+                '-' | '_' => Some(KEY_MINUS),
+                '=' | '+' => Some(KEY_EQUAL),
+                '[' | '{' => Some(KEY_BRACKET_LEFT),
+                ']' | '}' => Some(KEY_BRACKET_RIGHT),
+                '\\' | '|' => Some(KEY_BACKSLASH),
+                ';' | ':' => Some(KEY_SEMICOLON),
+                '\'' | '"' => Some(KEY_QUOTE),
+                ',' | '<' => Some(KEY_COMMA),
+                '.' | '>' => Some(KEY_PERIOD),
+                '/' | '?' => Some(KEY_SLASH),
+                ' ' => Some(KEY_SPACE),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Key event action type in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    /// Key release.
+    Release,
+    /// Key press.
+    Press,
+    /// Key repeat.
+    Repeat,
+}
+
+impl KeyAction {
+    fn into_wrapper(self) -> key::Action {
+        match self {
+            Self::Release => key::Action::Release,
+            Self::Press => key::Action::Press,
+            Self::Repeat => key::Action::Repeat,
+        }
+    }
+}
+
+/// Compatibility key event wrapper.
+#[derive(Debug)]
+pub struct KeyEvent {
+    inner: key::Event<'static>,
+}
+
+impl KeyEvent {
+    /// Create a key event.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner: key::Event::new()?,
+        })
+    }
+
+    /// Set the action.
+    pub fn set_action(&mut self, action: KeyAction) {
+        self.inner.set_action(action.into_wrapper());
+    }
+
+    /// Set the raw key code.
+    pub fn set_key(&mut self, key_code: i32) {
+        self.inner.set_key(key_from_raw(key_code));
+    }
+
+    /// Set modifier bits.
+    pub fn set_mods(&mut self, modifiers: u16) {
+        self.inner.set_mods(key::Mods::from_bits_retain(modifiers));
+    }
+
+    /// Alias for [`Self::set_mods`].
+    pub fn set_modifiers(&mut self, modifiers: u16) {
+        self.set_mods(modifiers);
+    }
+
+    /// Set consumed modifier bits.
+    pub fn set_consumed_mods(&mut self, modifiers: u16) {
+        self.inner
+            .set_consumed_mods(key::Mods::from_bits_retain(modifiers));
+    }
+
+    /// Alias for [`Self::set_consumed_mods`].
+    pub fn set_consumed_modifiers(&mut self, modifiers: u16) {
+        self.set_consumed_mods(modifiers);
+    }
+
+    /// Set composition state.
+    pub fn set_composing(&mut self, composing: bool) {
+        self.inner.set_composing(composing);
+    }
+
+    /// Set the unshifted Unicode codepoint.
+    pub fn set_unshifted_codepoint(&mut self, codepoint: u32) {
+        if let Some(codepoint) = char::from_u32(codepoint) {
+            self.inner.set_unshifted_codepoint(codepoint);
+        }
+    }
+
+    /// Set UTF-8 text for the event.
+    pub fn set_utf8(&mut self, text: &str) {
+        self.inner.set_utf8(Some(text));
+    }
+}
+
+/// Compatibility key encoder wrapper.
+#[derive(Debug)]
+pub struct KeyEncoder {
+    inner: key::Encoder<'static>,
+}
+
+impl KeyEncoder {
+    /// Create a key encoder.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner: key::Encoder::new()?,
+        })
+    }
+
+    /// Apply terminal-derived input options.
+    pub fn set_options(&mut self, options: &TerminalInputOptions) {
+        self.inner
+            .set_cursor_key_application(options.cursor_key_application)
+            .set_keypad_key_application(options.keypad_key_application)
+            .set_alt_esc_prefix(options.alt_esc_prefix)
+            .set_kitty_flags(key::KittyKeyFlags::from_bits_retain(options.kitty_flags))
+            .set_macos_option_as_alt(key::OptionAsAlt::False);
+
+        // `modifyOtherKeys` is not represented in the shared input summary yet.
+        self.inner.set_modify_other_keys_state_2(false);
+    }
+
+    /// Set Kitty keyboard protocol flags.
+    pub fn set_kitty_flags(&mut self, flags: u8) {
+        self.inner
+            .set_kitty_flags(key::KittyKeyFlags::from_bits_retain(flags));
+    }
+
+    /// Set cursor key application mode.
+    pub fn set_cursor_key_application(&mut self, enabled: bool) {
+        self.inner.set_cursor_key_application(enabled);
+    }
+
+    /// Set keypad key application mode.
+    pub fn set_keypad_key_application(&mut self, enabled: bool) {
+        self.inner.set_keypad_key_application(enabled);
+    }
+
+    /// Set alt-escape-prefix mode.
+    pub fn set_alt_esc_prefix(&mut self, enabled: bool) {
+        self.inner.set_alt_esc_prefix(enabled);
+    }
+
+    /// Set modifyOtherKeys mode 2.
+    pub fn set_modify_other_keys_state_2(&mut self, enabled: bool) {
+        self.inner.set_modify_other_keys_state_2(enabled);
+    }
+
+    /// Set macOS option-as-alt behavior.
+    pub fn set_macos_option_as_alt(&mut self, enabled: bool) {
+        let option = if enabled {
+            key::OptionAsAlt::True
+        } else {
+            key::OptionAsAlt::False
+        };
+        self.inner.set_macos_option_as_alt(option);
+    }
+
+    /// Encode a key event into terminal bytes.
+    pub fn encode(&mut self, event: &KeyEvent) -> Result<Vec<u8>> {
+        let mut encoded = Vec::new();
+        self.inner.encode_to_vec(&event.inner, &mut encoded)?;
+        Ok(encoded)
+    }
+}
+
+/// Mouse event action in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseAction {
+    /// Mouse press.
+    Press,
+    /// Mouse release.
+    Release,
+    /// Mouse motion.
+    Motion,
+}
+
+impl MouseAction {
+    fn into_wrapper(self) -> mouse::Action {
+        match self {
+            Self::Press => mouse::Action::Press,
+            Self::Release => mouse::Action::Release,
+            Self::Motion => mouse::Action::Motion,
+        }
+    }
+}
+
+/// Mouse button in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    /// Unknown button.
+    Unknown,
+    /// Left button.
+    Left,
+    /// Right button.
+    Right,
+    /// Middle button.
+    Middle,
+    /// Fourth auxiliary button.
+    Four,
+    /// Fifth auxiliary button.
+    Five,
+}
+
+impl MouseButton {
+    fn into_wrapper(self) -> mouse::Button {
+        match self {
+            Self::Unknown => mouse::Button::Unknown,
+            Self::Left => mouse::Button::Left,
+            Self::Right => mouse::Button::Right,
+            Self::Middle => mouse::Button::Middle,
+            Self::Four => mouse::Button::Four,
+            Self::Five => mouse::Button::Five,
+        }
+    }
+}
+
+/// Mouse tracking mode in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTrackingMode {
+    /// Mouse reporting disabled.
+    None,
+    /// X10 reporting.
+    X10,
+    /// Normal click reporting.
+    Normal,
+    /// Button tracking.
+    Button,
+    /// Motion tracking.
+    Any,
+}
+
+impl MouseTrackingMode {
+    fn into_wrapper(self) -> mouse::TrackingMode {
+        match self {
+            Self::None => mouse::TrackingMode::None,
+            Self::X10 => mouse::TrackingMode::X10,
+            Self::Normal => mouse::TrackingMode::Normal,
+            Self::Button => mouse::TrackingMode::Button,
+            Self::Any => mouse::TrackingMode::Any,
+        }
+    }
+}
+
+/// Mouse format in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseFormat {
+    /// X10 format.
+    X10,
+    /// UTF-8 format.
+    Utf8,
+    /// SGR format.
+    Sgr,
+    /// URXVT format.
+    Urxvt,
+    /// SGR pixels format.
+    SgrPixels,
+}
+
+impl MouseFormat {
+    fn into_wrapper(self) -> mouse::Format {
+        match self {
+            Self::X10 => mouse::Format::X10,
+            Self::Utf8 => mouse::Format::Utf8,
+            Self::Sgr => mouse::Format::Sgr,
+            Self::Urxvt => mouse::Format::Urxvt,
+            Self::SgrPixels => mouse::Format::SgrPixels,
+        }
+    }
+}
+
+/// Mouse encoder geometry in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MouseEncoderSize {
+    /// Full screen width in pixels.
+    pub screen_width: u32,
+    /// Full screen height in pixels.
+    pub screen_height: u32,
+    /// Cell width in pixels.
+    pub cell_width: u32,
+    /// Cell height in pixels.
+    pub cell_height: u32,
+    /// Top padding in pixels.
+    pub padding_top: u32,
+    /// Bottom padding in pixels.
+    pub padding_bottom: u32,
+    /// Right padding in pixels.
+    pub padding_right: u32,
+    /// Left padding in pixels.
+    pub padding_left: u32,
+}
+
+impl From<MouseEncoderSize> for mouse::EncoderSize {
+    fn from(value: MouseEncoderSize) -> Self {
+        Self {
+            screen_width: value.screen_width,
+            screen_height: value.screen_height,
+            cell_width: value.cell_width,
+            cell_height: value.cell_height,
+            padding_top: value.padding_top,
+            padding_bottom: value.padding_bottom,
+            padding_right: value.padding_right,
+            padding_left: value.padding_left,
+        }
+    }
+}
+
+/// Compatibility mouse event wrapper.
+#[derive(Debug)]
+pub struct MouseEvent {
+    inner: mouse::Event<'static>,
+}
+
+impl MouseEvent {
+    /// Create a mouse event.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner: mouse::Event::new()?,
+        })
+    }
+
+    /// Set the action.
+    pub fn set_action(&mut self, action: MouseAction) {
+        self.inner.set_action(action.into_wrapper());
+    }
+
+    /// Set the button.
+    pub fn set_button(&mut self, button: Option<MouseButton>) {
+        self.inner.set_button(button.map(MouseButton::into_wrapper));
+    }
+
+    /// Clear the current button.
+    pub fn clear_button(&mut self) {
+        self.set_button(None);
+    }
+
+    /// Set modifier bits.
+    pub fn set_mods(&mut self, modifiers: u16) {
+        self.inner.set_mods(key::Mods::from_bits_retain(modifiers));
+    }
+
+    /// Alias for [`Self::set_mods`].
+    pub fn set_modifiers(&mut self, modifiers: u16) {
+        self.set_mods(modifiers);
+    }
+
+    /// Set surface-space mouse position.
+    pub fn set_position(&mut self, x: f32, y: f32) {
+        self.inner.set_position(mouse::Position { x, y });
+    }
+}
+
+/// Compatibility mouse encoder wrapper.
+#[derive(Debug)]
+pub struct MouseEncoder {
+    inner: mouse::Encoder<'static>,
+}
+
+impl MouseEncoder {
+    /// Create a mouse encoder.
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            inner: mouse::Encoder::new()?,
+        })
+    }
+
+    /// Apply terminal-derived input options.
+    pub fn set_options(&mut self, options: &TerminalInputOptions) {
+        self.inner
+            .set_tracking_mode(options.mouse_tracking_mode.into_wrapper())
+            .set_format(options.mouse_format.into_wrapper());
+    }
+
+    /// Set tracking mode.
+    pub fn set_tracking_mode(&mut self, tracking_mode: MouseTrackingMode) {
+        self.inner.set_tracking_mode(tracking_mode.into_wrapper());
+    }
+
+    /// Set output format.
+    pub fn set_format(&mut self, format: MouseFormat) {
+        self.inner.set_format(format.into_wrapper());
+    }
+
+    /// Set encoder geometry.
+    pub fn set_size(&mut self, size: MouseEncoderSize) {
+        self.inner.set_size(size.into());
+    }
+
+    /// Encode a mouse event into terminal bytes.
+    pub fn encode(&mut self, event: &MouseEvent) -> Result<Vec<u8>> {
+        let mut encoded = Vec::new();
+        self.inner.encode_to_vec(&event.inner, &mut encoded)?;
+        Ok(encoded)
+    }
+}
+
+/// Focus event in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FocusEvent {
+    /// Focus gained.
+    Gained,
+    /// Focus lost.
+    Lost,
+}
+
+impl FocusEvent {
+    fn into_wrapper(self) -> focus::Event {
+        match self {
+            Self::Gained => focus::Event::Gained,
+            Self::Lost => focus::Event::Lost,
+        }
+    }
+}
+
+/// Encode a focus event into terminal bytes.
+pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>> {
+    let mut encoded = [0u8; 16];
+    let written = event.into_wrapper().encode(&mut encoded)?;
+    Ok(encoded[..written].to_vec())
+}
+
 /// Build a compatibility cursor summary from a wrapper terminal.
 pub fn cursor_state(terminal: &Terminal<'_, '_>) -> Result<CursorState> {
     let cursor = terminal.cursor_state()?;
@@ -548,6 +1128,41 @@ fn cell_style_from_wrapper(style: WrapperStyle) -> CellStyle {
     }
 }
 
+fn key_from_raw(key_code: i32) -> key::Key {
+    u32::try_from(key_code)
+        .ok()
+        .and_then(|key_code| key::Key::try_from(key_code).ok())
+        .unwrap_or(key::Key::Unidentified)
+}
+
+fn mouse_tracking_mode_for_terminal(terminal: &Terminal<'_, '_>) -> Result<MouseTrackingMode> {
+    if terminal.mode(libghostty_vt::terminal::Mode::ANY_MOUSE)? {
+        Ok(MouseTrackingMode::Any)
+    } else if terminal.mode(libghostty_vt::terminal::Mode::BUTTON_MOUSE)? {
+        Ok(MouseTrackingMode::Button)
+    } else if terminal.mode(libghostty_vt::terminal::Mode::NORMAL_MOUSE)? {
+        Ok(MouseTrackingMode::Normal)
+    } else if terminal.mode(libghostty_vt::terminal::Mode::X10_MOUSE)? {
+        Ok(MouseTrackingMode::X10)
+    } else {
+        Ok(MouseTrackingMode::None)
+    }
+}
+
+fn mouse_format_for_terminal(terminal: &Terminal<'_, '_>) -> Result<MouseFormat> {
+    if terminal.mode(libghostty_vt::terminal::Mode::SGR_PIXELS_MOUSE)? {
+        Ok(MouseFormat::SgrPixels)
+    } else if terminal.mode(libghostty_vt::terminal::Mode::SGR_MOUSE)? {
+        Ok(MouseFormat::Sgr)
+    } else if terminal.mode(libghostty_vt::terminal::Mode::URXVT_MOUSE)? {
+        Ok(MouseFormat::Urxvt)
+    } else if terminal.mode(libghostty_vt::terminal::Mode::UTF8_MOUSE)? {
+        Ok(MouseFormat::Utf8)
+    } else {
+        Ok(MouseFormat::X10)
+    }
+}
+
 #[derive(Debug, Default)]
 struct CallbackState {
     pending_pty_writes: Vec<Vec<u8>>,
@@ -702,8 +1317,12 @@ fn default_device_attributes() -> DeviceAttributes {
 #[cfg(test)]
 mod tests {
     use super::{
-        InstallOptions, RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect, Screen,
-        TerminalCallbacks, cursor_state, grid_cell, grid_row, scrollbar_state,
+        FocusEvent, InstallOptions, KEY_A, KEY_ARROW_UP, KEY_C, KEY_DIGIT_0, KEY_MINUS, KEY_SLASH,
+        KEY_UNIDENTIFIED, KeyAction, KeyEncoder, KeyEvent, MODIFIER_CONTROL, MouseAction,
+        MouseButton, MouseEncoder, MouseEncoderSize, MouseEvent, MouseFormat, MouseTrackingMode,
+        RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect, Screen, TerminalCallbacks,
+        cursor_state, encode_focus, grid_cell, grid_row, key_from_name, scrollbar_state,
+        terminal_input_options,
     };
     use libghostty_vt::{
         Terminal, TerminalOptions,
@@ -818,5 +1437,81 @@ mod tests {
         assert!(!row.wrap_continuation);
         assert_eq!(row.semantic_prompt, RowSemanticPrompt::None);
         assert_eq!(cell.codepoint, Some(u32::from('p')));
+    }
+
+    #[test]
+    fn terminal_input_options_follow_terminal_modes() {
+        let (mut terminal, _) = install_callbacks();
+        terminal
+            .set_mode(libghostty_vt::terminal::Mode::DECCKM, true)
+            .expect("enable app cursor mode");
+        terminal
+            .set_mode(libghostty_vt::terminal::Mode::SGR_MOUSE, true)
+            .expect("enable sgr mouse mode");
+        terminal
+            .set_mode(libghostty_vt::terminal::Mode::NORMAL_MOUSE, true)
+            .expect("enable normal mouse mode");
+        terminal
+            .set_mode(libghostty_vt::terminal::Mode::ALT_ESC_PREFIX, true)
+            .expect("enable alt esc prefix mode");
+
+        let options = terminal_input_options(&terminal).expect("terminal input options");
+        assert!(options.cursor_key_application);
+        assert!(options.alt_esc_prefix);
+        assert_eq!(options.mouse_tracking_mode, MouseTrackingMode::Normal);
+        assert_eq!(options.mouse_format, MouseFormat::Sgr);
+    }
+
+    #[test]
+    fn key_mouse_and_focus_encoding_return_bytes() {
+        let mut key_encoder = KeyEncoder::new().expect("create key encoder");
+        key_encoder.set_kitty_flags(0x1f);
+
+        let mut key_event = KeyEvent::new().expect("create key event");
+        key_event.set_action(KeyAction::Press);
+        key_event.set_key(KEY_C);
+        key_event.set_mods(MODIFIER_CONTROL);
+        key_encoder.encode(&key_event).expect("encode key event");
+
+        let mut mouse_encoder = MouseEncoder::new().expect("create mouse encoder");
+        mouse_encoder.set_tracking_mode(MouseTrackingMode::Normal);
+        mouse_encoder.set_format(MouseFormat::Sgr);
+        mouse_encoder.set_size(MouseEncoderSize {
+            screen_width: 800,
+            screen_height: 600,
+            cell_width: 10,
+            cell_height: 20,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        });
+
+        let mut mouse_event = MouseEvent::new().expect("create mouse event");
+        mouse_event.set_action(MouseAction::Press);
+        mouse_event.set_button(Some(MouseButton::Left));
+        mouse_event.set_position(50.0, 40.0);
+        let mouse_bytes = mouse_encoder
+            .encode(&mouse_event)
+            .expect("encode mouse event");
+        assert!(!mouse_bytes.is_empty());
+
+        let focus_in = encode_focus(FocusEvent::Gained).expect("encode focus in");
+        let focus_out = encode_focus(FocusEvent::Lost).expect("encode focus out");
+        assert_eq!(focus_in, b"\x1b[I".to_vec());
+        assert_eq!(focus_out, b"\x1b[O".to_vec());
+    }
+
+    #[test]
+    fn key_from_name_handles_shifted_ascii_variants() {
+        assert_eq!(key_from_name("A"), Some(KEY_A));
+        assert_eq!(key_from_name("@"), Some(KEY_DIGIT_0 + 2));
+        assert_eq!(key_from_name("_"), Some(KEY_MINUS));
+        assert_eq!(key_from_name("?"), Some(KEY_SLASH));
+        assert_eq!(key_from_name("~"), Some(super::KEY_BACKQUOTE));
+        assert_eq!(key_from_name("up"), Some(KEY_ARROW_UP));
+        assert_eq!(key_from_name("bogus-key"), None);
+        assert_eq!(key_from_name("é"), None);
+        assert_eq!(KEY_UNIDENTIFIED, 0);
     }
 }
