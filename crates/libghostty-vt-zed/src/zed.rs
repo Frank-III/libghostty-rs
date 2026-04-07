@@ -21,8 +21,8 @@ use libghostty_vt::{
     style::{RgbColor as WrapperRgbColor, Style as WrapperStyle, StyleColor as WrapperStyleColor},
     terminal::{
         ColorScheme, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
-        PrimaryDeviceAttributes, SecondaryDeviceAttributes, SizeReportSize,
-        TertiaryDeviceAttributes,
+        PointCoordinate, PrimaryDeviceAttributes, SecondaryDeviceAttributes, SelectionPoint,
+        SizeReportSize, TertiaryDeviceAttributes,
     },
 };
 
@@ -40,6 +40,181 @@ pub enum RuntimeEffect {
 pub struct InstallOptions {
     /// XTVERSION response string to report.
     pub xtversion: &'static str,
+}
+
+/// Runtime metadata for the linked `libghostty-vt` library.
+pub type RuntimeInfo = libghostty_vt::runtime::RuntimeInfo;
+
+/// Initialize the linked `libghostty-vt` runtime and validate it can be used.
+pub fn initialize_runtime() -> AnyResult<RuntimeInfo> {
+    libghostty_vt::runtime::initialize_runtime()
+        .context("failed to initialize libghostty-vt runtime")
+}
+
+/// Linux-specific runtime readiness probe.
+#[cfg(target_os = "linux")]
+pub fn linux_readiness_probe() -> AnyResult<RuntimeInfo> {
+    libghostty_vt::runtime::linux_readiness_probe().context("linux ghostty probe failed")
+}
+
+/// Linux-specific runtime readiness probe.
+#[cfg(not(target_os = "linux"))]
+pub fn linux_readiness_probe() -> AnyResult<RuntimeInfo> {
+    anyhow::bail!("linux ghostty readiness probe is only available on linux")
+}
+
+/// The optimization mode the linked `libghostty-vt` library was built with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizeMode {
+    /// Debug mode.
+    Debug,
+    /// Release mode optimized for safety.
+    ReleaseSafe,
+    /// Release mode optimized for size.
+    ReleaseSmall,
+    /// Release mode optimized for speed.
+    ReleaseFast,
+    /// The linked library did not expose a known optimization mode.
+    Unknown(i32),
+}
+
+impl OptimizeMode {
+    /// Return the stable string form used by Zed logging.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "Debug",
+            Self::ReleaseSafe => "ReleaseSafe",
+            Self::ReleaseSmall => "ReleaseSmall",
+            Self::ReleaseFast => "ReleaseFast",
+            Self::Unknown(_) => "Unknown",
+        }
+    }
+}
+
+/// Summary of build configuration that callers can log without fallible handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildInfo {
+    /// Whether SIMD-accelerated code paths are enabled.
+    pub simd: bool,
+    /// The optimization mode used to build the linked library.
+    pub optimize_mode: OptimizeMode,
+}
+
+/// Whether SIMD-accelerated code paths are enabled.
+#[must_use]
+pub fn supports_simd() -> bool {
+    libghostty_vt::build_info::supports_simd().unwrap_or(false)
+}
+
+/// Read the linked library optimization mode, falling back to [`OptimizeMode::Unknown`].
+#[must_use]
+pub fn optimize_mode() -> OptimizeMode {
+    match libghostty_vt::build_info::optimize_mode() {
+        Ok(libghostty_vt::build_info::OptimizeMode::Debug) => OptimizeMode::Debug,
+        Ok(libghostty_vt::build_info::OptimizeMode::ReleaseSafe) => OptimizeMode::ReleaseSafe,
+        Ok(libghostty_vt::build_info::OptimizeMode::ReleaseSmall) => OptimizeMode::ReleaseSmall,
+        Ok(libghostty_vt::build_info::OptimizeMode::ReleaseFast) => OptimizeMode::ReleaseFast,
+        Err(_) => OptimizeMode::Unknown(-1),
+    }
+}
+
+/// Read a small build configuration summary for the linked library.
+#[must_use]
+pub fn build_info() -> BuildInfo {
+    BuildInfo {
+        simd: supports_simd(),
+        optimize_mode: optimize_mode(),
+    }
+}
+
+const MODE_FOCUS_EVENT: u16 = raw_mode_value(1004, false);
+
+#[inline]
+const fn raw_mode_value(value: u16, ansi: bool) -> u16 {
+    (value & 0x7fff) | ((ansi as u16) << 15)
+}
+
+/// Run a compatibility-focused sanity check against the linked runtime.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn runtime_sanity_check(install_options: InstallOptions) -> AnyResult<()> {
+    let terminal = Terminal::new_with_install_options(
+        TerminalOptions {
+            cols: 40,
+            rows: 5,
+            max_scrollback: 128,
+        },
+        install_options,
+    )?;
+    terminal.vt_write(b"hello\r\n\x1b[1;32mworld\x1b[0m\r\nline3\r\nline4\r\nline5\r\nline6\r\n");
+
+    let _ = terminal.dimensions()?;
+    let _ = terminal.cols()?;
+    let _ = terminal.rows()?;
+    let _ = terminal.cursor_state()?;
+    let _ = terminal.mode(MODE_FOCUS_EVENT)?;
+    let _ = terminal.mouse_tracking_enabled()?;
+    let _ = terminal.is_mouse_tracking()?;
+    let _ = terminal.fg_color()?;
+    let _ = terminal.bg_color()?;
+    let _ = terminal.color_palette()?;
+    let _ = terminal.history_cell(0, 0)?;
+    let _ = terminal.format_plain_text(true, false)?;
+    let _ = terminal.search_matches("hello")?;
+    let _ = terminal.selection_string(true, 0, 0, true, 1, 0, false, false)?;
+    let _ = terminal.selection_string_points(
+        SelectionPoint::Active(PointCoordinate::new(0, 0)),
+        SelectionPoint::Active(PointCoordinate::new(1, 0)),
+        false,
+        false,
+    )?;
+    let _ = terminal.hyperlink_uri_at(0, 0)?;
+    let _ = terminal.hyperlink_uri_at_screen(PointCoordinate::new(0, 0))?;
+
+    let mut render_state = RenderState::new()?;
+    let snapshot = render_state.snapshot(&terminal)?;
+    if snapshot.rows_data.is_empty() {
+        anyhow::bail!("ghostty render state returned zero rows for sanity check");
+    }
+
+    let mut key_encoder = KeyEncoder::new()?;
+    key_encoder.set_kitty_flags(0x1f);
+    let mut key_event = KeyEvent::new()?;
+    key_event.set_action(KeyAction::Press);
+    key_event.set_key(KEY_C);
+    key_event.set_mods(0x2);
+    let _ = key_encoder.encode(&key_event)?;
+
+    let mut mouse_encoder = MouseEncoder::new()?;
+    mouse_encoder.set_tracking_mode(MouseTrackingMode::Normal);
+    mouse_encoder.set_format(MouseFormat::Sgr);
+    mouse_encoder.set_size(MouseEncoderSize {
+        screen_width: 800,
+        screen_height: 600,
+        cell_width: 10,
+        cell_height: 20,
+        padding_top: 0,
+        padding_bottom: 0,
+        padding_right: 0,
+        padding_left: 0,
+    });
+    let mut mouse_event = MouseEvent::new()?;
+    mouse_event.set_action(MouseAction::Press);
+    mouse_event.set_button(Some(MouseButton::Left));
+    mouse_event.set_position(50.0, 40.0);
+    let _ = mouse_encoder.encode(&mouse_event)?;
+
+    let _ = encode_focus(FocusEvent::Gained)?;
+    let _ = encode_focus(FocusEvent::Lost)?;
+    let _ = build_info();
+
+    Ok(())
+}
+
+/// Run a compatibility-focused sanity check against the linked runtime.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn runtime_sanity_check(_install_options: InstallOptions) -> AnyResult<()> {
+    anyhow::bail!("libghostty-vt runtime checks are only available on macOS and linux")
 }
 
 /// Dirty state for a render snapshot.
@@ -1990,7 +2165,8 @@ mod tests {
         KEY_UNIDENTIFIED, KeyAction, KeyEncoder, KeyEvent, MODIFIER_CONTROL, MouseAction,
         MouseButton, MouseEncoder, MouseEncoderSize, MouseEvent, MouseFormat, MouseTrackingMode,
         PointTag, RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect, Screen, Terminal,
-        TerminalOptions, encode_focus, key_from_name,
+        TerminalOptions, build_info, encode_focus, initialize_runtime, key_from_name,
+        runtime_sanity_check,
     };
     fn install_callbacks() -> Terminal {
         Terminal::new_with_install_options(
@@ -2023,6 +2199,32 @@ mod tests {
             terminal.drain_effects(),
             vec![RuntimeEffect::TitleChanged(None)]
         );
+    }
+
+    #[test]
+    fn shared_runtime_helpers_report_metadata() {
+        let runtime_info = initialize_runtime().expect("initialize runtime");
+        assert_eq!(
+            runtime_info.commit,
+            libghostty_vt::build_info::GHOSTTY_COMMIT
+        );
+        assert!(
+            !runtime_info.library_dir.is_empty(),
+            "expected wrapper runtime library directory to be populated"
+        );
+
+        let build_info = build_info();
+        assert_eq!(
+            build_info.simd,
+            libghostty_vt::build_info::supports_simd().unwrap_or(false)
+        );
+        assert!(!build_info.optimize_mode.as_str().is_empty());
+    }
+
+    #[test]
+    fn shared_runtime_sanity_check_runs() {
+        runtime_sanity_check(InstallOptions { xtversion: "Zed" })
+            .expect("runtime sanity check should pass");
     }
 
     #[test]
