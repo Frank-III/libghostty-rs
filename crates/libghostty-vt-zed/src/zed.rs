@@ -6,7 +6,7 @@
 
 //! Thin Zed-specific adapter helpers built on top of `libghostty-vt`.
 
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, rc::Rc, sync::OnceLock};
 
 use anyhow::{Context as _, Result as AnyResult};
 use libghostty_vt::{
@@ -47,6 +47,15 @@ pub type RuntimeInfo = libghostty_vt::runtime::RuntimeInfo;
 
 /// Initialize the linked `libghostty-vt` runtime and validate it can be used.
 pub fn initialize_runtime() -> AnyResult<RuntimeInfo> {
+    static INIT_RESULT: OnceLock<std::result::Result<RuntimeInfo, String>> = OnceLock::new();
+
+    INIT_RESULT
+        .get_or_init(|| initialize_runtime_once().map_err(|error| format!("{error:#}")))
+        .clone()
+        .map_err(anyhow::Error::msg)
+}
+
+fn initialize_runtime_once() -> AnyResult<RuntimeInfo> {
     libghostty_vt::runtime::initialize_runtime()
         .context("failed to initialize libghostty-vt runtime")
 }
