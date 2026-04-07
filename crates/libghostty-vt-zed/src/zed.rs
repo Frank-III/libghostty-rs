@@ -316,6 +316,87 @@ pub struct TerminalInputOptions {
     pub mouse_format: MouseFormat,
 }
 
+/// Terminal construction options in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalOptions {
+    /// Terminal columns.
+    pub cols: u16,
+    /// Terminal rows.
+    pub rows: u16,
+    /// Maximum scrollback lines.
+    pub max_scrollback: usize,
+}
+
+/// Point namespace for grid and selection lookups.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointTag {
+    /// Coordinates in the active screen history-aware space.
+    Active,
+    /// Coordinates relative to the viewport.
+    Viewport,
+    /// Coordinates relative to the visible screen.
+    Screen,
+    /// Coordinates in scrollback history.
+    History,
+}
+
+/// Viewport scrolling operation in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollViewport {
+    /// Jump to the top of scrollback.
+    Top,
+    /// Jump to the active bottom.
+    Bottom,
+    /// Scroll by a delta, where negative moves up.
+    Delta(isize),
+}
+
+/// Formatter output format in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// Plain text formatting.
+    Plain,
+}
+
+impl From<Format> for libghostty_vt::fmt::Format {
+    fn from(value: Format) -> Self {
+        match value {
+            Format::Plain => Self::Plain,
+        }
+    }
+}
+
+/// Formatter options in the Zed compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatterOptions {
+    /// Output format.
+    pub format: Format,
+    /// Trim trailing whitespace.
+    pub trim: bool,
+    /// Unwrap soft-wrapped lines.
+    pub unwrap: bool,
+}
+
+impl FormatterOptions {
+    /// Plain-text formatting options.
+    #[must_use]
+    pub fn plain(trim: bool, unwrap: bool) -> Self {
+        Self {
+            format: Format::Plain,
+            trim,
+            unwrap,
+        }
+    }
+
+    fn into_wrapper(self) -> libghostty_vt::fmt::FormatterOptions {
+        libghostty_vt::fmt::FormatterOptions {
+            format: self.format.into(),
+            trim: self.trim,
+            unwrap: self.unwrap,
+        }
+    }
+}
+
 /// Build shared terminal input options from a wrapper terminal.
 pub fn terminal_input_options(terminal: &Terminal<'_, '_>) -> Result<TerminalInputOptions> {
     let mode_state = terminal.mode_state()?;
@@ -328,6 +409,69 @@ pub fn terminal_input_options(terminal: &Terminal<'_, '_>) -> Result<TerminalInp
         mouse_tracking_mode: mouse_tracking_mode_for_terminal(terminal)?,
         mouse_format: mouse_format_for_terminal(terminal)?,
     })
+}
+
+/// Convert compatibility terminal options into wrapper options.
+#[must_use]
+pub fn terminal_options(options: TerminalOptions) -> libghostty_vt::TerminalOptions {
+    libghostty_vt::TerminalOptions {
+        cols: options.cols,
+        rows: options.rows,
+        max_scrollback: options.max_scrollback,
+    }
+}
+
+/// Convert a compatibility point tag and coordinates into a wrapper point.
+#[must_use]
+pub fn point(tag: PointTag, x: u16, y: u32) -> libghostty_vt::terminal::Point {
+    let coordinate = libghostty_vt::terminal::PointCoordinate::new(x, y);
+    match tag {
+        PointTag::Active => libghostty_vt::terminal::Point::Active(coordinate),
+        PointTag::Viewport => libghostty_vt::terminal::Point::Viewport(coordinate),
+        PointTag::Screen => libghostty_vt::terminal::Point::Screen(coordinate),
+        PointTag::History => libghostty_vt::terminal::Point::History(coordinate),
+    }
+}
+
+/// Convert a compatibility viewport scroll command into the wrapper shape.
+#[must_use]
+pub fn scroll_viewport(value: ScrollViewport) -> libghostty_vt::terminal::ScrollViewport {
+    match value {
+        ScrollViewport::Top => libghostty_vt::terminal::ScrollViewport::Top,
+        ScrollViewport::Bottom => libghostty_vt::terminal::ScrollViewport::Bottom,
+        ScrollViewport::Delta(delta) => libghostty_vt::terminal::ScrollViewport::Delta(delta),
+    }
+}
+
+/// Convert raw selection endpoint fields into a wrapper selection point.
+#[must_use]
+pub fn selection_point(active: bool, x: u16, y: u32) -> libghostty_vt::terminal::SelectionPoint {
+    let coordinate = libghostty_vt::terminal::PointCoordinate::new(x, y);
+    if active {
+        libghostty_vt::terminal::SelectionPoint::Active(coordinate)
+    } else {
+        libghostty_vt::terminal::SelectionPoint::Screen(coordinate)
+    }
+}
+
+/// Format terminal contents with compatibility formatter options.
+pub fn format_terminal(terminal: &Terminal<'_, '_>, options: FormatterOptions) -> Result<String> {
+    let mut formatter = libghostty_vt::fmt::Formatter::new(terminal, options.into_wrapper())?;
+    let required = formatter.format_len()?;
+
+    if required == 0 {
+        return Ok(String::new());
+    }
+
+    let mut bytes = vec![0_u8; required];
+    let written = formatter.format_buf(&mut bytes)?;
+    bytes.truncate(written);
+    String::from_utf8(bytes).map_err(|_| libghostty_vt::error::Error::InvalidValue)
+}
+
+/// Format terminal contents as plain text.
+pub fn format_plain_text(terminal: &Terminal<'_, '_>, trim: bool, unwrap: bool) -> Result<String> {
+    format_terminal(terminal, FormatterOptions::plain(trim, unwrap))
 }
 
 /// Ghostty key code for an unidentified key.
