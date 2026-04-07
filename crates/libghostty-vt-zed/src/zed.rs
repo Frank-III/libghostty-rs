@@ -1907,17 +1907,34 @@ fn render_colors_from_wrapper(colors: libghostty_vt::render::Colors) -> RenderCo
 fn render_cell_from_wrapper(
     cell: &libghostty_vt::render::CellIteration<'static, '_>,
 ) -> Result<RenderCell> {
-    let raw_cell = cell.raw_cell()?;
-    let graphemes = cell.graphemes()?.into_iter().map(u32::from).collect();
+    let raw_cell = invalid_value_to_option(cell.raw_cell())?;
+    let graphemes = invalid_value_to_default(cell.graphemes())?
+        .into_iter()
+        .map(u32::from)
+        .collect();
+    let codepoint = raw_cell
+        .map(|raw_cell| invalid_value_to_option(raw_cell.codepoint()))
+        .transpose()?
+        .flatten()
+        .filter(|codepoint| *codepoint != 0);
+    let wide = raw_cell
+        .map(|raw_cell| invalid_value_to_option(raw_cell.wide()))
+        .transpose()?
+        .flatten()
+        .map_or(CellWide::Narrow, cell_wide_from_wrapper);
+    let has_hyperlink = raw_cell
+        .map(|raw_cell| invalid_value_to_default(raw_cell.has_hyperlink()))
+        .transpose()?
+        .unwrap_or(false);
 
     Ok(RenderCell {
-        raw: raw_cell.as_raw(),
-        codepoint: Some(raw_cell.codepoint()?).filter(|codepoint| *codepoint != 0),
-        wide: cell_wide_from_wrapper(raw_cell.wide()?),
-        style: cell_style_from_wrapper(cell.style()?),
+        raw: raw_cell.map_or(0, libghostty_vt::screen::Cell::as_raw),
+        codepoint,
+        wide,
+        style: cell_style_from_wrapper(invalid_value_to_default(cell.style())?),
         resolved_background: cell.bg_color()?.map(rgb_color_from_wrapper),
         resolved_foreground: cell.fg_color()?.map(rgb_color_from_wrapper),
-        has_hyperlink: raw_cell.has_hyperlink()?,
+        has_hyperlink,
         graphemes,
     })
 }
@@ -1927,7 +1944,7 @@ fn render_row_from_wrapper(
     row_cells: &mut CellIterator<'static>,
     columns: u16,
 ) -> Result<RenderRow> {
-    let raw_row = row.raw_row()?;
+    let raw_row = invalid_value_to_option(row.raw_row())?;
     let mut cell_iteration = row_cells.update(row)?;
     let mut cells = Vec::with_capacity(columns as usize);
 
@@ -1937,15 +1954,43 @@ fn render_row_from_wrapper(
 
     let render_row = RenderRow {
         dirty: row.dirty()?,
-        wrapped: raw_row.is_wrapped()?,
-        wrap_continuation: raw_row.is_wrap_continuation()?,
-        has_kitty_virtual_placeholder: raw_row.has_kitty_virtual_placeholder()?,
+        wrapped: raw_row
+            .map(|raw_row| invalid_value_to_default(raw_row.is_wrapped()))
+            .transpose()?
+            .unwrap_or(false),
+        wrap_continuation: raw_row
+            .map(|raw_row| invalid_value_to_default(raw_row.is_wrap_continuation()))
+            .transpose()?
+            .unwrap_or(false),
+        has_kitty_virtual_placeholder: raw_row
+            .map(|raw_row| invalid_value_to_default(raw_row.has_kitty_virtual_placeholder()))
+            .transpose()?
+            .unwrap_or(false),
         cells,
     };
 
     row.set_dirty(false)?;
 
     Ok(render_row)
+}
+
+fn invalid_value_to_option<T>(result: libghostty_vt::error::Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(libghostty_vt::error::Error::InvalidValue) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn invalid_value_to_default<T>(result: libghostty_vt::error::Result<T>) -> Result<T>
+where
+    T: Default,
+{
+    match result {
+        Ok(value) => Ok(value),
+        Err(libghostty_vt::error::Error::InvalidValue) => Ok(T::default()),
+        Err(error) => Err(error),
+    }
 }
 
 fn cell_wide_from_wrapper(wide: WrapperCellWide) -> CellWide {
