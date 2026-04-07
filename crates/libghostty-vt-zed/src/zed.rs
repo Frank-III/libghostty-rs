@@ -1818,7 +1818,7 @@ impl RenderState {
     pub fn update(&mut self, terminal: &Terminal) -> AnyResult<RenderSnapshot> {
         terminal.with_inner(|terminal| {
             let snapshot = self.inner.update(terminal)?;
-            Self::adapt_snapshot(&snapshot).map_err(anyhow::Error::new)
+            Self::adapt_snapshot(&snapshot, terminal).map_err(anyhow::Error::new)
         })
     }
 
@@ -1827,12 +1827,17 @@ impl RenderState {
         self.update(terminal)
     }
 
-    fn adapt_snapshot(snapshot: &Snapshot<'static, '_>) -> Result<RenderSnapshot> {
-        let columns = snapshot.cols()?;
-        let rows = snapshot.rows()?;
-        let dirty = render_dirty_from_wrapper(snapshot.dirty()?);
-        let cursor = render_cursor_from_wrapper(snapshot)?;
-        let colors = render_colors_from_wrapper(snapshot.colors()?);
+    fn adapt_snapshot(
+        snapshot: &Snapshot<'static, '_>,
+        terminal: &WrapperTerminal<'static, 'static>,
+    ) -> Result<RenderSnapshot> {
+        let columns = invalid_value_to_option(snapshot.cols())?.unwrap_or(terminal.cols()?);
+        let rows = invalid_value_to_option(snapshot.rows())?.unwrap_or(terminal.rows()?);
+        let dirty = invalid_value_to_option(snapshot.dirty())?
+            .map(render_dirty_from_wrapper)
+            .unwrap_or(RenderDirty::Full);
+        let cursor = render_cursor_from_wrapper(snapshot, terminal)?;
+        let colors = render_colors_from_wrapper(snapshot, terminal)?;
 
         let mut row_iterator = RowIterator::new()?;
         let mut row_iteration = row_iterator.update(snapshot)?;
@@ -1880,28 +1885,93 @@ fn row_semantic_prompt_from_wrapper(prompt: WrapperRowSemanticPrompt) -> RowSema
     }
 }
 
-fn render_cursor_from_wrapper(snapshot: &Snapshot<'static, '_>) -> Result<RenderCursor> {
-    let viewport = snapshot.cursor_viewport()?;
+fn render_cursor_from_wrapper(
+    snapshot: &Snapshot<'static, '_>,
+    terminal: &WrapperTerminal<'static, 'static>,
+) -> Result<RenderCursor> {
+    let cursor_state = invalid_value_to_option(terminal.cursor_state())?;
+    let viewport = invalid_value_to_option(snapshot.cursor_viewport())?.flatten();
     Ok(RenderCursor {
-        visible: snapshot.cursor_visible()?,
-        blinking: snapshot.cursor_blinking()?,
+        visible: invalid_value_to_option(snapshot.cursor_visible())?
+            .or_else(|| cursor_state.map(|cursor| cursor.visible))
+            .unwrap_or(false),
+        blinking: invalid_value_to_default(snapshot.cursor_blinking())?,
         in_viewport: viewport.is_some(),
         viewport_column: viewport.map(|cursor| cursor.x),
         viewport_row: viewport.map(|cursor| cursor.y),
     })
 }
 
-fn render_colors_from_wrapper(colors: libghostty_vt::render::Colors) -> RenderColors {
-    RenderColors {
-        background: rgb_color_from_wrapper(colors.background),
-        foreground: rgb_color_from_wrapper(colors.foreground),
-        cursor: colors.cursor.map(rgb_color_from_wrapper),
-        palette: colors
-            .palette
-            .into_iter()
-            .map(rgb_color_from_wrapper)
-            .collect(),
-    }
+fn render_colors_from_wrapper(
+    snapshot: &Snapshot<'static, '_>,
+    terminal: &WrapperTerminal<'static, 'static>,
+) -> Result<RenderColors> {
+    let colors = invalid_value_to_option(snapshot.colors())?;
+    let background = colors
+        .as_ref()
+        .map(|colors| rgb_color_from_wrapper(colors.background))
+        .or_else(|| {
+            terminal
+                .bg_color()
+                .ok()
+                .flatten()
+                .map(rgb_color_from_wrapper)
+        })
+        .unwrap_or(RgbColor {
+            red: 0x00,
+            green: 0x00,
+            blue: 0x00,
+        });
+    let foreground = colors
+        .as_ref()
+        .map(|colors| rgb_color_from_wrapper(colors.foreground))
+        .or_else(|| {
+            terminal
+                .fg_color()
+                .ok()
+                .flatten()
+                .map(rgb_color_from_wrapper)
+        })
+        .unwrap_or(RgbColor {
+            red: 0xff,
+            green: 0xff,
+            blue: 0xff,
+        });
+
+    let cursor = colors
+        .as_ref()
+        .and_then(|colors| colors.cursor.map(rgb_color_from_wrapper))
+        .or_else(|| {
+            terminal
+                .cursor_color()
+                .ok()
+                .flatten()
+                .map(rgb_color_from_wrapper)
+        });
+    let palette = colors
+        .as_ref()
+        .map(|colors| {
+            colors
+                .palette
+                .iter()
+                .copied()
+                .map(rgb_color_from_wrapper)
+                .collect()
+        })
+        .or_else(|| {
+            terminal
+                .color_palette()
+                .ok()
+                .map(|palette| palette.into_iter().map(rgb_color_from_wrapper).collect())
+        })
+        .unwrap_or_default();
+
+    Ok(RenderColors {
+        background,
+        foreground,
+        cursor,
+        palette,
+    })
 }
 
 fn render_cell_from_wrapper(
