@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [features]
 allocator_api = ["dep:allocator-api2"]
+simd = ["libghostty-vt-sys/simd"]
 link-static = ["libghostty-vt-sys/link-static"]
 
 [dependencies]
