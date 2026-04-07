@@ -92,6 +92,12 @@ impl GridRef<'_> {
 pub struct Row(pub(crate) ffi::Row);
 
 impl Row {
+    /// Expose the underlying raw row handle for temporary compatibility layers.
+    #[must_use]
+    pub fn as_raw(self) -> u64 {
+        self.0
+    }
+
     fn get<T>(&self, tag: ffi::RowData::Type) -> Result<T> {
         let mut value = MaybeUninit::<T>::zeroed();
         let result = unsafe { ffi::ghostty_row_get(self.0, tag, value.as_mut_ptr().cast()) };
@@ -144,6 +150,12 @@ impl Row {
 pub struct Cell(pub(crate) ffi::Cell);
 
 impl Cell {
+    /// Expose the underlying raw cell handle for temporary compatibility layers.
+    #[must_use]
+    pub fn as_raw(self) -> u64 {
+        self.0
+    }
+
     fn get<T>(&self, tag: ffi::CellData::Type) -> Result<T> {
         let mut value = MaybeUninit::<T>::zeroed();
         let result = unsafe { ffi::ghostty_cell_get(self.0, tag, value.as_mut_ptr().cast()) };

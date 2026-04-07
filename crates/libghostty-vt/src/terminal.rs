@@ -4,7 +4,7 @@ use std::{marker::PhantomData, mem::MaybeUninit};
 
 use crate::{
     alloc::{Allocator, Object},
-    error::{Error, Result, from_optional_result, from_result, from_result_with_len},
+    error::{from_optional_result, from_result, from_result_with_len, Error, Result},
     ffi::{self, TerminalData as Data, TerminalOption as Opt},
     key,
     screen::GridRef,
@@ -160,6 +160,16 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             inner: Object::new(raw)?,
             vtable: VTable::default(),
         })
+    }
+
+    /// Borrow the underlying raw `ghostty_terminal_t` handle.
+    ///
+    /// This exists as a temporary escape hatch for compatibility adapters that
+    /// still need to interoperate with lower-level `libghostty-vt` APIs during
+    /// migration.
+    #[must_use]
+    pub fn as_raw(&self) -> ffi::Terminal {
+        self.inner.as_raw()
     }
 
     /// Write VT-encoded data to the terminal for processing.

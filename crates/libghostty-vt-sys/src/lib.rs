@@ -14,6 +14,10 @@ pub use patched::*;
 
 /// Ghostty commit pinned by the vendored build.
 pub const GHOSTTY_COMMIT: &str = env!("LIBGHOSTTY_VT_GHOSTTY_COMMIT");
+/// Dynamic library directory emitted by the build script when available.
+pub const LIB_DIR: Option<&str> = option_env!("LIBGHOSTTY_VT_LIB_DIR");
+/// Link kind emitted by the build script when available.
+pub const LINK_KIND: Option<&str> = option_env!("LIBGHOSTTY_VT_LINK_KIND");
 
 /// Initialize a "sized" FFI object.
 #[macro_export]

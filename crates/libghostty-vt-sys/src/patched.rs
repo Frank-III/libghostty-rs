@@ -1,4 +1,4 @@
-use crate::{GhosttyResult, GhosttyTerminal_ptr};
+use crate::{Result, Terminal};
 
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone)]
@@ -11,16 +11,16 @@ pub struct GhosttyTerminalSearchMatch {
 
 unsafe extern "C" {
     pub fn ghostty_terminal_search_matches(
-        terminal: GhosttyTerminal_ptr,
+        terminal: Terminal,
         needle: *const u8,
         needle_len: usize,
         out_matches: *mut GhosttyTerminalSearchMatch,
         out_matches_len: usize,
         out_len: *mut usize,
-    ) -> GhosttyResult;
+    ) -> Result::Type;
 
     pub fn ghostty_terminal_selection_string(
-        terminal: GhosttyTerminal_ptr,
+        terminal: Terminal,
         start_active: bool,
         start_x: u16,
         start_y: u32,
@@ -32,14 +32,14 @@ unsafe extern "C" {
         out_buf: *mut u8,
         out_buf_len: usize,
         out_len: *mut usize,
-    ) -> GhosttyResult;
+    ) -> Result::Type;
 
     pub fn ghostty_terminal_hyperlink_uri_at(
-        terminal: GhosttyTerminal_ptr,
+        terminal: Terminal,
         x: u16,
         y: u32,
         out_buf: *mut u8,
         out_buf_len: usize,
         out_len: *mut usize,
-    ) -> GhosttyResult;
+    ) -> Result::Type;
 }

@@ -46,6 +46,7 @@ pub mod mouse;
 pub mod osc;
 pub mod paste;
 pub mod render;
+pub mod runtime;
 pub mod screen;
 pub mod sgr;
 pub mod style;
