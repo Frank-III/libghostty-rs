@@ -12,7 +12,10 @@ use libghostty_vt::{
     RenderState as WrapperRenderState, Terminal,
     error::Result,
     render::{CellIterator, Dirty, RowIteration, RowIterator, Snapshot},
-    screen::CellWide as WrapperCellWide,
+    screen::{
+        Cell as WrapperCell, CellWide as WrapperCellWide, GridRef, Row as WrapperRow,
+        RowSemanticPrompt as WrapperRowSemanticPrompt,
+    },
     style::{RgbColor as WrapperRgbColor, Style as WrapperStyle, StyleColor as WrapperStyleColor},
     terminal::{
         ColorScheme, ConformanceLevel, DeviceAttributeFeature, DeviceAttributes, DeviceType,
@@ -110,6 +113,86 @@ pub struct CellStyle {
     pub overline: bool,
     /// Raw underline style value.
     pub underline: i32,
+}
+
+/// Shared screen identity used by compatibility summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    /// Primary terminal screen.
+    Primary,
+    /// Alternate screen buffer.
+    Alternate,
+}
+
+/// Cursor-related terminal state in the compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorState {
+    /// Cursor column position.
+    pub column: u16,
+    /// Cursor row position.
+    pub row: u16,
+    /// Whether the next printable character wraps first.
+    pub pending_wrap: bool,
+    /// Whether the cursor is visible.
+    pub visible: bool,
+    /// Active screen buffer.
+    pub active_screen: Screen,
+    /// Active Kitty keyboard flags as a raw bitset.
+    pub kitty_flags: u8,
+}
+
+/// Scrollbar state in the compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScrollbarState {
+    /// Total scrollable rows.
+    pub total: u64,
+    /// Current scroll offset.
+    pub offset: u64,
+    /// Visible scrollbar length.
+    pub len: u64,
+}
+
+/// Prompt classification for a grid row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowSemanticPrompt {
+    /// No prompt cells in the row.
+    None,
+    /// Prompt cells exist in the row.
+    Prompt,
+    /// Prompt continuation cells exist in the row.
+    PromptContinuation,
+}
+
+/// Grid cell data in the compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridCell {
+    /// Primary codepoint for the cell, if any.
+    pub codepoint: Option<u32>,
+    /// Width classification.
+    pub wide: CellWide,
+    /// Cell style metadata.
+    pub style: CellStyle,
+}
+
+/// Grid row data in the compatibility shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridRow {
+    /// Whether the row is soft-wrapped.
+    pub wrapped: bool,
+    /// Whether the row continues a wrapped line.
+    pub wrap_continuation: bool,
+    /// Whether any cells contain grapheme clusters.
+    pub has_grapheme_cluster: bool,
+    /// Whether any cells are styled.
+    pub is_styled: bool,
+    /// Whether any cells have hyperlinks.
+    pub has_hyperlink: bool,
+    /// Prompt metadata for the row.
+    pub semantic_prompt: RowSemanticPrompt,
+    /// Whether the row contains Kitty placeholder cells.
+    pub has_kitty_virtual_placeholder: bool,
+    /// Whether the row is dirty.
+    pub is_dirty: bool,
 }
 
 /// Rendered cell data in the Zed compatibility shape.
@@ -215,6 +298,69 @@ impl RenderSnapshot {
     }
 }
 
+/// Build a compatibility cursor summary from a wrapper terminal.
+pub fn cursor_state(terminal: &Terminal<'_, '_>) -> Result<CursorState> {
+    let cursor = terminal.cursor_state()?;
+    Ok(CursorState {
+        column: cursor.column,
+        row: cursor.row,
+        pending_wrap: cursor.pending_wrap,
+        visible: cursor.visible,
+        active_screen: screen_from_raw(cursor.active_screen as i32),
+        kitty_flags: cursor.kitty_keyboard_flags.bits(),
+    })
+}
+
+/// Build a compatibility scrollbar summary from a wrapper terminal.
+pub fn scrollbar_state(terminal: &Terminal<'_, '_>) -> Result<ScrollbarState> {
+    terminal.scrollbar().map(|scrollbar| ScrollbarState {
+        total: scrollbar.total,
+        offset: scrollbar.offset,
+        len: scrollbar.len,
+    })
+}
+
+/// Convert a wrapper grid row into the compatibility shape.
+pub fn grid_row_from_wrapper(row: WrapperRow) -> Result<GridRow> {
+    Ok(GridRow {
+        wrapped: row.is_wrapped()?,
+        wrap_continuation: row.is_wrap_continuation()?,
+        has_grapheme_cluster: row.has_grapheme_cluster()?,
+        is_styled: row.is_styled()?,
+        has_hyperlink: row.has_hyperlink()?,
+        semantic_prompt: row_semantic_prompt_from_wrapper(row.semantic_prompt()?),
+        has_kitty_virtual_placeholder: row.has_kitty_virtual_placeholder()?,
+        is_dirty: row.is_dirty()?,
+    })
+}
+
+/// Convert a wrapper grid cell and style into the compatibility shape.
+pub fn grid_cell_from_wrapper(cell: WrapperCell, style: WrapperStyle) -> Result<GridCell> {
+    let codepoint = if cell.has_text()? {
+        Some(cell.codepoint()?)
+    } else {
+        None
+    };
+
+    Ok(GridCell {
+        codepoint,
+        wide: cell_wide_from_wrapper(cell.wide()?),
+        style: cell_style_from_wrapper(style),
+    })
+}
+
+/// Resolve a compatibility grid row from a wrapper grid reference.
+pub fn grid_row(grid_ref: &GridRef<'_>) -> Result<GridRow> {
+    grid_row_from_wrapper(grid_ref.row()?)
+}
+
+/// Resolve a compatibility grid cell from a wrapper grid reference.
+pub fn grid_cell(grid_ref: &GridRef<'_>) -> Result<GridCell> {
+    let style = grid_ref.style()?;
+    let cell = grid_ref.cell()?;
+    grid_cell_from_wrapper(cell, style)
+}
+
 /// Eager render-state adapter for Zed compatibility consumers.
 #[derive(Debug)]
 pub struct RenderState {
@@ -273,6 +419,22 @@ fn render_dirty_from_wrapper(dirty: Dirty) -> RenderDirty {
         Dirty::Clean => RenderDirty::Clean,
         Dirty::Partial => RenderDirty::Partial,
         Dirty::Full => RenderDirty::Full,
+    }
+}
+
+fn screen_from_raw(raw: i32) -> Screen {
+    if raw == 1 {
+        Screen::Alternate
+    } else {
+        Screen::Primary
+    }
+}
+
+fn row_semantic_prompt_from_wrapper(prompt: WrapperRowSemanticPrompt) -> RowSemanticPrompt {
+    match prompt {
+        WrapperRowSemanticPrompt::None => RowSemanticPrompt::None,
+        WrapperRowSemanticPrompt::Prompt => RowSemanticPrompt::Prompt,
+        WrapperRowSemanticPrompt::Continuation => RowSemanticPrompt::PromptContinuation,
     }
 }
 
@@ -539,8 +701,14 @@ fn default_device_attributes() -> DeviceAttributes {
 
 #[cfg(test)]
 mod tests {
-    use super::{InstallOptions, RenderDirty, RenderState, RuntimeEffect, TerminalCallbacks};
-    use libghostty_vt::{Terminal, TerminalOptions};
+    use super::{
+        InstallOptions, RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect, Screen,
+        TerminalCallbacks, cursor_state, grid_cell, grid_row, scrollbar_state,
+    };
+    use libghostty_vt::{
+        Terminal, TerminalOptions,
+        terminal::{Point, PointCoordinate},
+    };
 
     fn install_callbacks() -> (Box<Terminal<'static, 'static>>, TerminalCallbacks) {
         let mut terminal = Box::new(
@@ -619,5 +787,36 @@ mod tests {
         let combined = snapshot.plain_text_rows().join("\n");
         assert!(combined.contains("abc"));
         assert!(combined.contains("def"));
+    }
+
+    #[test]
+    fn cursor_and_scrollbar_summaries_match_terminal_state() {
+        let (terminal, _) = install_callbacks();
+
+        let cursor = cursor_state(&terminal).expect("cursor state");
+        let scrollbar = scrollbar_state(&terminal).expect("scrollbar state");
+
+        assert_eq!(cursor.column, 0);
+        assert_eq!(cursor.row, 0);
+        assert!(cursor.visible);
+        assert_eq!(cursor.active_screen, Screen::Primary);
+        assert_eq!(scrollbar.offset, 0);
+        assert!(scrollbar.total >= scrollbar.len);
+    }
+
+    #[test]
+    fn grid_summaries_match_wrapped_prompt_content() {
+        let (mut terminal, _) = install_callbacks();
+        terminal.vt_write(b"prompt\r\n");
+
+        let grid_ref = terminal
+            .grid_ref(Point::Active(PointCoordinate::new(0, 0)))
+            .expect("grid ref");
+        let row = grid_row(&grid_ref).expect("grid row");
+        let cell = grid_cell(&grid_ref).expect("grid cell");
+
+        assert!(!row.wrap_continuation);
+        assert_eq!(row.semantic_prompt, RowSemanticPrompt::None);
+        assert_eq!(cell.codepoint, Some(u32::from('p')));
     }
 }
