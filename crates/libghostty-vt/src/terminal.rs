@@ -347,6 +347,18 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
             .map(key::KittyKeyFlags::from_bits_retain)
     }
 
+    /// Get a typed snapshot of cursor-related terminal state.
+    pub fn cursor_state(&self) -> Result<CursorState> {
+        Ok(CursorState {
+            column: self.cursor_x()?,
+            row: self.cursor_y()?,
+            pending_wrap: self.is_cursor_pending_wrap()?,
+            visible: self.is_cursor_visible()?,
+            active_screen: self.active_screen()?,
+            kitty_keyboard_flags: self.kitty_keyboard_flags()?,
+        })
+    }
+
     /// Get the scrollbar state for the terminal viewport.
     ///
     /// This may be expensive to calculate depending on where the viewport is
@@ -365,6 +377,35 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
     /// or any-event) are enabled.
     pub fn is_mouse_tracking(&self) -> Result<bool> {
         self.get(Data::MOUSE_TRACKING)
+    }
+
+    /// Get a typed summary of commonly-used terminal modes.
+    pub fn mode_state(&self) -> Result<ModeState> {
+        let x10_mouse = self.mode(Mode::X10_MOUSE)?;
+        let normal_mouse = self.mode(Mode::NORMAL_MOUSE)?;
+        let button_mouse = self.mode(Mode::BUTTON_MOUSE)?;
+        let any_mouse = self.mode(Mode::ANY_MOUSE)?;
+        let sgr_mouse = self.mode(Mode::SGR_MOUSE)?;
+        let utf8_mouse = self.mode(Mode::UTF8_MOUSE)?;
+
+        Ok(ModeState {
+            app_cursor: self.mode(Mode::DECCKM)?,
+            app_keypad: self.mode(Mode::KEYPAD_KEYS)?,
+            show_cursor: self.mode(Mode::CURSOR_VISIBLE)?,
+            line_wrap: self.mode(Mode::WRAPAROUND)?,
+            origin: self.mode(Mode::ORIGIN)?,
+            insert: self.mode(Mode::INSERT)?,
+            line_feed_new_line: self.mode(Mode::LINEFEED)?,
+            focus_in_out: self.mode(Mode::FOCUS_EVENT)?,
+            alternate_scroll: self.mode(Mode::ALT_SCROLL)?,
+            bracketed_paste: self.mode(Mode::BRACKETED_PASTE)?,
+            mouse_report_click: x10_mouse || normal_mouse,
+            mouse_drag: button_mouse,
+            mouse_motion: any_mouse,
+            sgr_mouse,
+            utf8_mouse: !sgr_mouse && utf8_mouse,
+            alt_screen: self.active_screen()? == ffi::TerminalScreen::ALTERNATE,
+        })
     }
     /// Get the terminal title as set by escape sequences (e.g. OSC inner/2).
     ///
@@ -729,6 +770,20 @@ pub struct SearchMatch {
     pub end: PointCoordinate,
 }
 
+impl SearchMatch {
+    /// Get the start position of the match.
+    #[must_use]
+    pub const fn start(self) -> PointCoordinate {
+        self.start
+    }
+
+    /// Get the end position of the match.
+    #[must_use]
+    pub const fn end(self) -> PointCoordinate {
+        self.end
+    }
+}
+
 /// Selection endpoint used by [`Terminal::selection_string`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelectionPoint {
@@ -736,6 +791,45 @@ pub enum SelectionPoint {
     Active(PointCoordinate),
     /// Point within full screen coordinates including scrollback.
     Screen(PointCoordinate),
+}
+
+/// Cursor-related terminal state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorState {
+    /// Cursor column position in the active area.
+    pub column: u16,
+    /// Cursor row position in the active area.
+    pub row: u16,
+    /// Whether the next printable character will wrap first.
+    pub pending_wrap: bool,
+    /// Whether the cursor is visible.
+    pub visible: bool,
+    /// Currently active screen.
+    pub active_screen: ffi::TerminalScreen::Type,
+    /// Active Kitty keyboard protocol flags.
+    pub kitty_keyboard_flags: key::KittyKeyFlags,
+}
+
+/// Commonly-used terminal mode summary.
+#[expect(missing_docs, reason = "field names describe the summarized mode flags")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModeState {
+    pub app_cursor: bool,
+    pub app_keypad: bool,
+    pub show_cursor: bool,
+    pub line_wrap: bool,
+    pub origin: bool,
+    pub insert: bool,
+    pub line_feed_new_line: bool,
+    pub focus_in_out: bool,
+    pub alternate_scroll: bool,
+    pub bracketed_paste: bool,
+    pub mouse_report_click: bool,
+    pub mouse_drag: bool,
+    pub mouse_motion: bool,
+    pub sgr_mouse: bool,
+    pub utf8_mouse: bool,
+    pub alt_screen: bool,
 }
 
 impl SelectionPoint {
