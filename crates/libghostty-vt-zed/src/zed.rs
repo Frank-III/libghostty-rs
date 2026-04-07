@@ -42,6 +42,17 @@ pub struct InstallOptions {
     pub xtversion: &'static str,
 }
 
+/// Raw encoded value for cursor-key application mode.
+pub const MODE_CURSOR_KEY_APPLICATION: u16 = mode_value(1, false);
+/// Raw encoded value for normal mouse-tracking mode.
+pub const MODE_MOUSE_NORMAL: u16 = mode_value(1000, false);
+/// Raw encoded value for focus-event mode.
+pub const MODE_FOCUS_EVENT: u16 = mode_value(1004, false);
+/// Raw encoded value for SGR mouse-reporting mode.
+pub const MODE_MOUSE_SGR: u16 = mode_value(1006, false);
+/// Raw encoded value for alt-sends-escape-prefix mode.
+pub const MODE_ALT_ESC_PREFIX: u16 = mode_value(1036, false);
+
 /// Runtime metadata for the linked `libghostty-vt` library.
 pub type RuntimeInfo = libghostty_vt::runtime::RuntimeInfo;
 
@@ -136,9 +147,6 @@ pub fn build_info() -> BuildInfo {
         optimize_mode: optimize_mode(),
     }
 }
-
-/// Raw encoded value for DECSET 1004 / focus-event mode.
-pub const MODE_FOCUS_EVENT: u16 = mode_value(1004, false);
 
 /// Encode a Ghostty mode value using the compatibility bit layout Zed expects.
 #[inline]
