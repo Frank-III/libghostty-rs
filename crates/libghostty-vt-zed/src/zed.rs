@@ -8,8 +8,9 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use anyhow::{Context as _, Result as AnyResult};
 use libghostty_vt::{
-    RenderState as WrapperRenderState, Terminal,
+    RenderState as WrapperRenderState, Terminal as WrapperTerminal,
     error::Result,
     focus, key, mouse,
     render::{CellIterator, Dirty, RowIteration, RowIterator, Snapshot},
@@ -397,8 +398,508 @@ impl FormatterOptions {
     }
 }
 
+/// Zed compatibility terminal wrapper built on top of `libghostty-vt`.
+#[derive(Debug)]
+pub struct Terminal {
+    inner: RefCell<Box<WrapperTerminal<'static, 'static>>>,
+    callbacks: TerminalCallbacks,
+}
+
+impl Terminal {
+    /// Create a terminal using the default Zed callback install options.
+    pub fn new(options: TerminalOptions) -> AnyResult<Self> {
+        Self::new_with_install_options(options, InstallOptions { xtversion: "Zed" })
+    }
+
+    /// Create a terminal with explicit callback install options.
+    pub fn new_with_install_options(
+        options: TerminalOptions,
+        install_options: InstallOptions,
+    ) -> AnyResult<Self> {
+        if options.cols == 0 || options.rows == 0 {
+            anyhow::bail!("terminal dimensions must be non-zero")
+        }
+
+        let columns = options.cols;
+        let rows = options.rows;
+        let mut inner = Box::new(
+            WrapperTerminal::new(terminal_options(options))
+                .context("failed to create ghostty terminal")?,
+        );
+        let callbacks = TerminalCallbacks::new(columns, rows);
+        callbacks
+            .install(&mut inner, install_options)
+            .context("failed to install ghostty terminal callbacks")?;
+        Ok(Self {
+            inner: RefCell::new(inner),
+            callbacks,
+        })
+    }
+
+    /// Create a terminal from raw dimensions.
+    pub fn new_with_dimensions(columns: u16, rows: u16, max_scrollback: usize) -> AnyResult<Self> {
+        Self::new(TerminalOptions {
+            cols: columns,
+            rows,
+            max_scrollback,
+        })
+    }
+
+    /// Resize the terminal and update the callback-reported size.
+    pub fn resize(
+        &self,
+        columns: u16,
+        rows: u16,
+        cell_width_px: u32,
+        cell_height_px: u32,
+    ) -> AnyResult<()> {
+        if columns == 0 || rows == 0 || cell_width_px == 0 || cell_height_px == 0 {
+            anyhow::bail!("terminal dimensions and cell sizes must be non-zero")
+        }
+
+        self.with_inner_mut(|terminal| {
+            terminal
+                .resize(columns, rows, cell_width_px, cell_height_px)
+                .context("failed to resize ghostty terminal")
+        })
+        .inspect(|_| {
+            self.callbacks
+                .update_size(columns, rows, cell_width_px, cell_height_px);
+        })
+    }
+
+    /// Reset the terminal state.
+    pub fn reset(&self) {
+        let _ = self.with_inner_mut(|terminal| {
+            terminal.reset();
+            Ok(())
+        });
+    }
+
+    /// Write VT bytes into the terminal parser.
+    pub fn vt_write(&self, data: &[u8]) {
+        let _ = self.with_inner_mut(|terminal| {
+            terminal.vt_write(data);
+            Ok(())
+        });
+    }
+
+    /// Alias for [`Self::vt_write`].
+    pub fn write_vt(&self, data: &[u8]) {
+        self.vt_write(data);
+    }
+
+    /// Drain queued PTY writes.
+    #[must_use]
+    pub fn drain_pty_writes(&self) -> Vec<Vec<u8>> {
+        self.callbacks.drain_pty_writes()
+    }
+
+    /// Drain queued runtime effects.
+    #[must_use]
+    pub fn drain_effects(&self) -> Vec<RuntimeEffect> {
+        self.callbacks.drain_effects()
+    }
+
+    /// Scroll the viewport.
+    pub fn scroll_viewport(&self, scroll: ScrollViewport) {
+        let _ = self.with_inner_mut(|terminal| {
+            terminal.scroll_viewport(crate::scroll_viewport(scroll));
+            Ok(())
+        });
+    }
+
+    /// Scroll to the top of the viewport history.
+    pub fn scroll_viewport_top(&self) {
+        self.scroll_viewport(ScrollViewport::Top);
+    }
+
+    /// Scroll to the live bottom.
+    pub fn scroll_viewport_bottom(&self) {
+        self.scroll_viewport(ScrollViewport::Bottom);
+    }
+
+    /// Scroll the viewport by a delta.
+    pub fn scroll_viewport_delta(&self, delta: isize) {
+        self.scroll_viewport(ScrollViewport::Delta(delta));
+    }
+
+    /// Read a terminal mode.
+    pub fn mode(&self, mode: u16) -> AnyResult<bool> {
+        self.with_inner(|terminal| {
+            terminal
+                .mode(mode_from_raw(mode))
+                .context("failed to read ghostty terminal mode")
+        })
+    }
+
+    /// Alias for [`Self::mode`].
+    pub fn mode_enabled(&self, mode: u16) -> AnyResult<bool> {
+        self.mode(mode)
+    }
+
+    /// Set a terminal mode.
+    pub fn set_mode(&self, mode: u16, enabled: bool) -> AnyResult<()> {
+        self.with_inner_mut(|terminal| {
+            terminal
+                .set_mode(mode_from_raw(mode), enabled)
+                .context("failed to set ghostty terminal mode")
+        })
+    }
+
+    /// Read current terminal dimensions.
+    pub fn dimensions(&self) -> AnyResult<(u16, u16)> {
+        Ok((self.cols()?, self.rows()?))
+    }
+
+    /// Read terminal columns.
+    pub fn cols(&self) -> AnyResult<u16> {
+        self.with_inner(|terminal| {
+            terminal
+                .cols()
+                .context("failed to read ghostty terminal columns")
+        })
+    }
+
+    /// Read terminal rows.
+    pub fn rows(&self) -> AnyResult<u16> {
+        self.with_inner(|terminal| {
+            terminal
+                .rows()
+                .context("failed to read ghostty terminal rows")
+        })
+    }
+
+    /// Read cursor column.
+    pub fn cursor_x(&self) -> AnyResult<u16> {
+        self.with_inner(|terminal| {
+            terminal
+                .cursor_x()
+                .context("failed to read ghostty cursor column")
+        })
+    }
+
+    /// Read cursor row.
+    pub fn cursor_y(&self) -> AnyResult<u16> {
+        self.with_inner(|terminal| {
+            terminal
+                .cursor_y()
+                .context("failed to read ghostty cursor row")
+        })
+    }
+
+    /// Read whether the cursor is pending wrap.
+    pub fn is_cursor_pending_wrap(&self) -> AnyResult<bool> {
+        self.with_inner(|terminal| {
+            terminal
+                .is_cursor_pending_wrap()
+                .context("failed to read ghostty cursor wrap state")
+        })
+    }
+
+    /// Read cursor visibility.
+    pub fn is_cursor_visible(&self) -> AnyResult<bool> {
+        self.with_inner(|terminal| {
+            terminal
+                .is_cursor_visible()
+                .context("failed to read ghostty cursor visibility")
+        })
+    }
+
+    /// Read Kitty keyboard protocol flags as raw bits.
+    pub fn kitty_keyboard_flags(&self) -> AnyResult<u8> {
+        self.with_inner(|terminal| {
+            terminal
+                .kitty_keyboard_flags()
+                .map(|flags| flags.bits())
+                .context("failed to read ghostty kitty keyboard flags")
+        })
+    }
+
+    /// Read a compatibility cursor summary.
+    pub fn cursor_state(&self) -> AnyResult<CursorState> {
+        self.with_inner(|terminal| {
+            crate::cursor_state(terminal).context("failed to read ghostty cursor state")
+        })
+    }
+
+    /// Read a compatibility mode summary.
+    pub fn mode_state(&self) -> AnyResult<libghostty_vt::terminal::ModeState> {
+        self.with_inner(|terminal| {
+            terminal
+                .mode_state()
+                .context("failed to read ghostty terminal mode state")
+        })
+    }
+
+    /// Read shared input options derived from terminal state.
+    pub fn input_options(&self) -> AnyResult<TerminalInputOptions> {
+        self.with_inner(|terminal| {
+            terminal_input_options(terminal)
+                .context("failed to read ghostty terminal input options")
+        })
+    }
+
+    /// Read the active screen buffer.
+    pub fn active_screen(&self) -> AnyResult<Screen> {
+        self.cursor_state().map(|cursor| cursor.active_screen)
+    }
+
+    /// Read whether mouse tracking is enabled.
+    pub fn mouse_tracking_enabled(&self) -> AnyResult<bool> {
+        self.with_inner(|terminal| {
+            terminal
+                .is_mouse_tracking()
+                .context("failed to read ghostty mouse tracking state")
+        })
+    }
+
+    /// Alias for [`Self::mouse_tracking_enabled`].
+    pub fn is_mouse_tracking(&self) -> AnyResult<bool> {
+        self.mouse_tracking_enabled()
+    }
+
+    /// Read the scrollbar state.
+    pub fn scrollbar(&self) -> AnyResult<ScrollbarState> {
+        self.with_inner(|terminal| {
+            crate::scrollbar_state(terminal).context("failed to read ghostty scrollbar state")
+        })
+    }
+
+    /// Read total terminal rows.
+    pub fn total_rows(&self) -> AnyResult<usize> {
+        self.with_inner(|terminal| {
+            terminal
+                .total_rows()
+                .context("failed to read ghostty total row count")
+        })
+    }
+
+    /// Read scrollback rows.
+    pub fn scrollback_rows(&self) -> AnyResult<usize> {
+        self.with_inner(|terminal| {
+            terminal
+                .scrollback_rows()
+                .context("failed to read ghostty scrollback row count")
+        })
+    }
+
+    /// Read the terminal foreground color.
+    pub fn foreground_color(&self) -> AnyResult<Option<RgbColor>> {
+        self.with_inner(|terminal| {
+            terminal
+                .fg_color()
+                .map(|color| color.map(rgb_color_from_wrapper))
+                .context("failed to read ghostty foreground color")
+        })
+    }
+
+    /// Alias for [`Self::foreground_color`].
+    pub fn fg_color(&self) -> AnyResult<Option<RgbColor>> {
+        self.foreground_color()
+    }
+
+    /// Read the terminal background color.
+    pub fn background_color(&self) -> AnyResult<Option<RgbColor>> {
+        self.with_inner(|terminal| {
+            terminal
+                .bg_color()
+                .map(|color| color.map(rgb_color_from_wrapper))
+                .context("failed to read ghostty background color")
+        })
+    }
+
+    /// Alias for [`Self::background_color`].
+    pub fn bg_color(&self) -> AnyResult<Option<RgbColor>> {
+        self.background_color()
+    }
+
+    /// Read the terminal cursor color.
+    pub fn cursor_color(&self) -> AnyResult<Option<RgbColor>> {
+        self.with_inner(|terminal| {
+            terminal
+                .cursor_color()
+                .map(|color| color.map(rgb_color_from_wrapper))
+                .context("failed to read ghostty cursor color")
+        })
+    }
+
+    /// Read a palette color override by index.
+    pub fn palette_color(&self, index: usize) -> AnyResult<Option<RgbColor>> {
+        self.get_terminal_palette_color(index)
+    }
+
+    /// Read the full terminal color palette.
+    pub fn color_palette(&self) -> AnyResult<[RgbColor; 256]> {
+        self.with_inner(|terminal| {
+            terminal
+                .color_palette()
+                .map(|colors| colors.map(rgb_color_from_wrapper))
+                .context("failed to read ghostty color palette")
+        })
+    }
+
+    /// Read an effective color by compatibility color index.
+    pub fn effective_color_for_index(&self, index: usize) -> AnyResult<Option<RgbColor>> {
+        match index {
+            0..=255 => self.palette_color(index),
+            256 => self.foreground_color(),
+            257 => self.background_color(),
+            258 => self.cursor_color(),
+            _ => Ok(None),
+        }
+    }
+
+    /// Read grid row metadata at a compatibility point.
+    pub fn grid_row(&self, tag: PointTag, x: u16, y: u32) -> AnyResult<Option<GridRow>> {
+        self.with_inner(|terminal| {
+            let grid_ref = match terminal.grid_ref(crate::point(tag, x, y)) {
+                Ok(grid_ref) => grid_ref,
+                Err(libghostty_vt::error::Error::InvalidValue) => return Ok(None),
+                Err(error) => {
+                    return Err(anyhow::Error::new(error))
+                        .context("failed to resolve ghostty grid ref");
+                }
+            };
+
+            crate::grid_row(&grid_ref)
+                .map(Some)
+                .context("failed to read ghostty grid ref row")
+        })
+    }
+
+    /// Read grid cell metadata at a compatibility point.
+    pub fn grid_cell(&self, tag: PointTag, x: u16, y: u32) -> AnyResult<Option<GridCell>> {
+        self.with_inner(|terminal| {
+            let grid_ref = match terminal.grid_ref(crate::point(tag, x, y)) {
+                Ok(grid_ref) => grid_ref,
+                Err(libghostty_vt::error::Error::InvalidValue) => return Ok(None),
+                Err(error) => {
+                    return Err(anyhow::Error::new(error))
+                        .context("failed to resolve ghostty grid ref");
+                }
+            };
+
+            crate::grid_cell(&grid_ref)
+                .map(Some)
+                .context("failed to read ghostty grid ref cell")
+        })
+    }
+
+    /// Read a history cell.
+    pub fn history_cell(&self, x: u16, y: u32) -> AnyResult<Option<GridCell>> {
+        self.grid_cell(PointTag::History, x, y)
+    }
+
+    /// Format terminal contents.
+    pub fn format(&self, options: FormatterOptions) -> AnyResult<String> {
+        self.with_inner(|terminal| {
+            crate::format_terminal(terminal, options)
+                .context("failed to format ghostty terminal output")
+        })
+    }
+
+    /// Format terminal contents as plain text.
+    pub fn format_plain_text(&self, trim: bool, unwrap: bool) -> AnyResult<String> {
+        self.format(FormatterOptions::plain(trim, unwrap))
+    }
+
+    /// Search terminal contents.
+    pub fn search_matches(
+        &self,
+        needle: &str,
+    ) -> AnyResult<Vec<libghostty_vt::terminal::SearchMatch>> {
+        self.with_inner(|terminal| {
+            terminal
+                .search_matches(needle)
+                .context("failed to search ghostty terminal")
+        })
+    }
+
+    /// Read selection text from raw compatibility endpoints.
+    #[expect(clippy::too_many_arguments, reason = "compatibility API shape")]
+    pub fn selection_string(
+        &self,
+        start_active: bool,
+        start_x: u16,
+        start_y: u32,
+        end_active: bool,
+        end_x: u16,
+        end_y: u32,
+        rectangle: bool,
+        trim: bool,
+    ) -> AnyResult<String> {
+        self.with_inner(|terminal| {
+            terminal
+                .selection_string(
+                    crate::selection_point(start_active, start_x, start_y),
+                    crate::selection_point(end_active, end_x, end_y),
+                    rectangle,
+                    trim,
+                )
+                .context("failed to read ghostty selection text")
+        })
+    }
+
+    /// Read selection text from typed points.
+    pub fn selection_string_points(
+        &self,
+        start: libghostty_vt::terminal::SelectionPoint,
+        end: libghostty_vt::terminal::SelectionPoint,
+        rectangle: bool,
+        trim: bool,
+    ) -> AnyResult<String> {
+        self.with_inner(|terminal| {
+            terminal
+                .selection_string(start, end, rectangle, trim)
+                .context("failed to read ghostty selection text")
+        })
+    }
+
+    /// Read a hyperlink URI at screen coordinates.
+    pub fn hyperlink_uri_at(&self, x: u16, y: u32) -> AnyResult<Option<String>> {
+        self.with_inner(|terminal| {
+            terminal
+                .hyperlink_uri_at_screen(libghostty_vt::terminal::PointCoordinate::new(x, y))
+                .context("failed to read ghostty hyperlink URI")
+        })
+    }
+
+    /// Read a hyperlink URI at a typed screen point.
+    pub fn hyperlink_uri_at_screen(
+        &self,
+        point: libghostty_vt::terminal::PointCoordinate,
+    ) -> AnyResult<Option<String>> {
+        self.hyperlink_uri_at(point.x, point.y)
+    }
+
+    fn get_terminal_palette_color(&self, index: usize) -> AnyResult<Option<RgbColor>> {
+        if index > 255 {
+            return Ok(None);
+        }
+
+        Ok(Some(self.color_palette()?[index]))
+    }
+
+    fn with_inner<T>(
+        &self,
+        operation: impl FnOnce(&WrapperTerminal<'static, 'static>) -> AnyResult<T>,
+    ) -> AnyResult<T> {
+        let terminal = self.inner.borrow();
+        operation(&terminal)
+    }
+
+    fn with_inner_mut<T>(
+        &self,
+        operation: impl FnOnce(&mut WrapperTerminal<'static, 'static>) -> AnyResult<T>,
+    ) -> AnyResult<T> {
+        let mut terminal = self.inner.borrow_mut();
+        operation(&mut terminal)
+    }
+}
+
 /// Build shared terminal input options from a wrapper terminal.
-pub fn terminal_input_options(terminal: &Terminal<'_, '_>) -> Result<TerminalInputOptions> {
+pub fn terminal_input_options(terminal: &WrapperTerminal<'_, '_>) -> Result<TerminalInputOptions> {
     let mode_state = terminal.mode_state()?;
 
     Ok(TerminalInputOptions {
@@ -455,7 +956,10 @@ pub fn selection_point(active: bool, x: u16, y: u32) -> libghostty_vt::terminal:
 }
 
 /// Format terminal contents with compatibility formatter options.
-pub fn format_terminal(terminal: &Terminal<'_, '_>, options: FormatterOptions) -> Result<String> {
+pub fn format_terminal(
+    terminal: &WrapperTerminal<'_, '_>,
+    options: FormatterOptions,
+) -> Result<String> {
     let mut formatter = libghostty_vt::fmt::Formatter::new(terminal, options.into_wrapper())?;
     let required = formatter.format_len()?;
 
@@ -470,7 +974,11 @@ pub fn format_terminal(terminal: &Terminal<'_, '_>, options: FormatterOptions) -
 }
 
 /// Format terminal contents as plain text.
-pub fn format_plain_text(terminal: &Terminal<'_, '_>, trim: bool, unwrap: bool) -> Result<String> {
+pub fn format_plain_text(
+    terminal: &WrapperTerminal<'_, '_>,
+    trim: bool,
+    unwrap: bool,
+) -> Result<String> {
     format_terminal(terminal, FormatterOptions::plain(trim, unwrap))
 }
 
@@ -1022,8 +1530,21 @@ pub fn encode_focus(event: FocusEvent) -> Result<Vec<u8>> {
     Ok(encoded[..written].to_vec())
 }
 
+fn mode_from_raw(mode: u16) -> libghostty_vt::terminal::Mode {
+    let is_ansi = (mode & 0x8000) != 0;
+    let raw_mode = mode & 0x7fff;
+    libghostty_vt::terminal::Mode::new(
+        raw_mode,
+        if is_ansi {
+            libghostty_vt::terminal::ModeKind::Ansi
+        } else {
+            libghostty_vt::terminal::ModeKind::Dec
+        },
+    )
+}
+
 /// Build a compatibility cursor summary from a wrapper terminal.
-pub fn cursor_state(terminal: &Terminal<'_, '_>) -> Result<CursorState> {
+pub fn cursor_state(terminal: &WrapperTerminal<'_, '_>) -> Result<CursorState> {
     let cursor = terminal.cursor_state()?;
     Ok(CursorState {
         column: cursor.column,
@@ -1036,7 +1557,7 @@ pub fn cursor_state(terminal: &Terminal<'_, '_>) -> Result<CursorState> {
 }
 
 /// Build a compatibility scrollbar summary from a wrapper terminal.
-pub fn scrollbar_state(terminal: &Terminal<'_, '_>) -> Result<ScrollbarState> {
+pub fn scrollbar_state(terminal: &WrapperTerminal<'_, '_>) -> Result<ScrollbarState> {
     terminal.scrollbar().map(|scrollbar| ScrollbarState {
         total: scrollbar.total,
         offset: scrollbar.offset,
@@ -1099,13 +1620,15 @@ impl RenderState {
     }
 
     /// Update the render state from a terminal and return an eager snapshot.
-    pub fn update(&mut self, terminal: &Terminal<'static, '_>) -> Result<RenderSnapshot> {
-        let snapshot = self.inner.update(terminal)?;
-        Self::adapt_snapshot(&snapshot)
+    pub fn update(&mut self, terminal: &Terminal) -> AnyResult<RenderSnapshot> {
+        terminal.with_inner(|terminal| {
+            let snapshot = self.inner.update(terminal)?;
+            Self::adapt_snapshot(&snapshot).map_err(anyhow::Error::new)
+        })
     }
 
     /// Alias for [`Self::update`].
-    pub fn snapshot(&mut self, terminal: &Terminal<'static, '_>) -> Result<RenderSnapshot> {
+    pub fn snapshot(&mut self, terminal: &Terminal) -> AnyResult<RenderSnapshot> {
         self.update(terminal)
     }
 
@@ -1279,7 +1802,9 @@ fn key_from_raw(key_code: i32) -> key::Key {
         .unwrap_or(key::Key::Unidentified)
 }
 
-fn mouse_tracking_mode_for_terminal(terminal: &Terminal<'_, '_>) -> Result<MouseTrackingMode> {
+fn mouse_tracking_mode_for_terminal(
+    terminal: &WrapperTerminal<'_, '_>,
+) -> Result<MouseTrackingMode> {
     if terminal.mode(libghostty_vt::terminal::Mode::ANY_MOUSE)? {
         Ok(MouseTrackingMode::Any)
     } else if terminal.mode(libghostty_vt::terminal::Mode::BUTTON_MOUSE)? {
@@ -1293,7 +1818,7 @@ fn mouse_tracking_mode_for_terminal(terminal: &Terminal<'_, '_>) -> Result<Mouse
     }
 }
 
-fn mouse_format_for_terminal(terminal: &Terminal<'_, '_>) -> Result<MouseFormat> {
+fn mouse_format_for_terminal(terminal: &WrapperTerminal<'_, '_>) -> Result<MouseFormat> {
     if terminal.mode(libghostty_vt::terminal::Mode::SGR_PIXELS_MOUSE)? {
         Ok(MouseFormat::SgrPixels)
     } else if terminal.mode(libghostty_vt::terminal::Mode::SGR_MOUSE)? {
@@ -1346,7 +1871,7 @@ impl TerminalCallbacks {
     /// invalidate the callback userdata.
     pub fn install(
         &self,
-        terminal: &mut Terminal<'static, 'static>,
+        terminal: &mut WrapperTerminal<'static, 'static>,
         options: InstallOptions,
     ) -> Result<()> {
         {
@@ -1421,7 +1946,7 @@ impl TerminalCallbacks {
     }
 }
 
-fn color_scheme_for_terminal(terminal: &Terminal<'_, '_>) -> Option<ColorScheme> {
+fn color_scheme_for_terminal(terminal: &WrapperTerminal<'_, '_>) -> Option<ColorScheme> {
     let mut render_state = WrapperRenderState::new().ok()?;
     let snapshot = render_state.update(terminal).ok()?;
     let background = snapshot.colors().ok()?.background;
@@ -1464,58 +1989,48 @@ mod tests {
         FocusEvent, InstallOptions, KEY_A, KEY_ARROW_UP, KEY_C, KEY_DIGIT_0, KEY_MINUS, KEY_SLASH,
         KEY_UNIDENTIFIED, KeyAction, KeyEncoder, KeyEvent, MODIFIER_CONTROL, MouseAction,
         MouseButton, MouseEncoder, MouseEncoderSize, MouseEvent, MouseFormat, MouseTrackingMode,
-        RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect, Screen, TerminalCallbacks,
-        cursor_state, encode_focus, grid_cell, grid_row, key_from_name, scrollbar_state,
-        terminal_input_options,
+        PointTag, RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect, Screen, Terminal,
+        TerminalOptions, encode_focus, key_from_name,
     };
-    use libghostty_vt::{
-        Terminal, TerminalOptions,
-        terminal::{Point, PointCoordinate},
-    };
-
-    fn install_callbacks() -> (Box<Terminal<'static, 'static>>, TerminalCallbacks) {
-        let mut terminal = Box::new(
-            Terminal::new(TerminalOptions {
+    fn install_callbacks() -> Terminal {
+        Terminal::new_with_install_options(
+            TerminalOptions {
                 cols: 20,
                 rows: 4,
                 max_scrollback: 128,
-            })
-            .expect("create terminal"),
-        );
-        let callbacks = TerminalCallbacks::new(20, 4);
-        callbacks
-            .install(&mut terminal, InstallOptions { xtversion: "Zed" })
-            .expect("install callbacks");
-        (terminal, callbacks)
+            },
+            InstallOptions { xtversion: "Zed" },
+        )
+        .expect("create terminal")
     }
 
     #[test]
     fn callbacks_queue_runtime_effects() {
-        let (mut terminal, callbacks) = install_callbacks();
+        let terminal = install_callbacks();
 
         terminal.vt_write(b"\x07");
-        assert_eq!(callbacks.drain_effects(), vec![RuntimeEffect::Bell]);
-        assert!(callbacks.drain_effects().is_empty());
+        assert_eq!(terminal.drain_effects(), vec![RuntimeEffect::Bell]);
+        assert!(terminal.drain_effects().is_empty());
 
         terminal.vt_write(b"\x1b]2;zed title\x07");
         assert_eq!(
-            callbacks.drain_effects(),
+            terminal.drain_effects(),
             vec![RuntimeEffect::TitleChanged(Some("zed title".to_owned()))]
         );
 
         terminal.vt_write(b"\x1b]2;\x07");
         assert_eq!(
-            callbacks.drain_effects(),
+            terminal.drain_effects(),
             vec![RuntimeEffect::TitleChanged(None)]
         );
     }
 
     #[test]
     fn callbacks_queue_pty_replies() {
-        let (mut terminal, callbacks) = install_callbacks();
+        let terminal = install_callbacks();
 
         terminal.vt_write(b"\x1b[>q");
-        let replies = callbacks.drain_pty_writes();
+        let replies = terminal.drain_pty_writes();
         assert_eq!(replies.len(), 1, "expected one XTVERSION reply");
         let reply = String::from_utf8(replies.into_iter().next().expect("reply"))
             .expect("XTVERSION reply should be valid UTF-8");
@@ -1526,14 +2041,14 @@ mod tests {
 
         terminal.vt_write(b"\x05");
         assert!(
-            callbacks.drain_pty_writes().is_empty(),
+            terminal.drain_pty_writes().is_empty(),
             "expected ENQ callback to stay silent"
         );
     }
 
     #[test]
     fn eager_render_snapshot_includes_text() {
-        let (mut terminal, _) = install_callbacks();
+        let terminal = install_callbacks();
         terminal.vt_write(b"abc\r\ndef\r\n");
 
         let mut render_state = RenderState::new().expect("create render state");
@@ -1554,10 +2069,10 @@ mod tests {
 
     #[test]
     fn cursor_and_scrollbar_summaries_match_terminal_state() {
-        let (terminal, _) = install_callbacks();
+        let terminal = install_callbacks();
 
-        let cursor = cursor_state(&terminal).expect("cursor state");
-        let scrollbar = scrollbar_state(&terminal).expect("scrollbar state");
+        let cursor = terminal.cursor_state().expect("cursor state");
+        let scrollbar = terminal.scrollbar().expect("scrollbar state");
 
         assert_eq!(cursor.column, 0);
         assert_eq!(cursor.row, 0);
@@ -1569,14 +2084,17 @@ mod tests {
 
     #[test]
     fn grid_summaries_match_wrapped_prompt_content() {
-        let (mut terminal, _) = install_callbacks();
+        let terminal = install_callbacks();
         terminal.vt_write(b"prompt\r\n");
 
-        let grid_ref = terminal
-            .grid_ref(Point::Active(PointCoordinate::new(0, 0)))
-            .expect("grid ref");
-        let row = grid_row(&grid_ref).expect("grid row");
-        let cell = grid_cell(&grid_ref).expect("grid cell");
+        let row = terminal
+            .grid_row(PointTag::Active, 0, 0)
+            .expect("grid row")
+            .expect("row");
+        let cell = terminal
+            .grid_cell(PointTag::Active, 0, 0)
+            .expect("grid cell")
+            .expect("cell");
 
         assert!(!row.wrap_continuation);
         assert_eq!(row.semantic_prompt, RowSemanticPrompt::None);
@@ -1585,21 +2103,21 @@ mod tests {
 
     #[test]
     fn terminal_input_options_follow_terminal_modes() {
-        let (mut terminal, _) = install_callbacks();
+        let terminal = install_callbacks();
         terminal
-            .set_mode(libghostty_vt::terminal::Mode::DECCKM, true)
+            .set_mode(libghostty_vt::terminal::Mode::DECCKM.into(), true)
             .expect("enable app cursor mode");
         terminal
-            .set_mode(libghostty_vt::terminal::Mode::SGR_MOUSE, true)
+            .set_mode(libghostty_vt::terminal::Mode::SGR_MOUSE.into(), true)
             .expect("enable sgr mouse mode");
         terminal
-            .set_mode(libghostty_vt::terminal::Mode::NORMAL_MOUSE, true)
+            .set_mode(libghostty_vt::terminal::Mode::NORMAL_MOUSE.into(), true)
             .expect("enable normal mouse mode");
         terminal
-            .set_mode(libghostty_vt::terminal::Mode::ALT_ESC_PREFIX, true)
+            .set_mode(libghostty_vt::terminal::Mode::ALT_ESC_PREFIX.into(), true)
             .expect("enable alt esc prefix mode");
 
-        let options = terminal_input_options(&terminal).expect("terminal input options");
+        let options = terminal.input_options().expect("terminal input options");
         assert!(options.cursor_key_application);
         assert!(options.alt_esc_prefix);
         assert_eq!(options.mouse_tracking_mode, MouseTrackingMode::Normal);
