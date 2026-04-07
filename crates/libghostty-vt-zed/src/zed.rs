@@ -137,10 +137,13 @@ pub fn build_info() -> BuildInfo {
     }
 }
 
-const MODE_FOCUS_EVENT: u16 = raw_mode_value(1004, false);
+/// Raw encoded value for DECSET 1004 / focus-event mode.
+pub const MODE_FOCUS_EVENT: u16 = mode_value(1004, false);
 
+/// Encode a Ghostty mode value using the compatibility bit layout Zed expects.
 #[inline]
-const fn raw_mode_value(value: u16, ansi: bool) -> u16 {
+#[must_use]
+pub const fn mode_value(value: u16, ansi: bool) -> u16 {
     (value & 0x7fff) | ((ansi as u16) << 15)
 }
 
