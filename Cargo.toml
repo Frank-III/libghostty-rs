@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/libghostty-vt", "crates/libghostty-vt-sys", "example/ghostling_rs"]
+members = [
+    "crates/libghostty-vt",
+    "crates/libghostty-vt-sys",
+    "crates/libghostty-vt-zed",
+    "example/ghostling_rs",
+]
 resolver = "2"
 
 [workspace.package]
@@ -12,3 +17,4 @@ version = "0.1.1"
 [workspace.dependencies]
 libghostty-vt = { path = "crates/libghostty-vt", version = "0.1.1" }
 libghostty-vt-sys = { path = "crates/libghostty-vt-sys", version = "0.1.1" }
+libghostty-vt-zed = { path = "crates/libghostty-vt-zed", version = "0.1.1" }
