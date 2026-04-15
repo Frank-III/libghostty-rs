@@ -988,6 +988,30 @@ impl Terminal {
         self.grid_cell(PointTag::History, x, y)
     }
 
+    /// Convert a point from one coordinate space into another.
+    pub fn point_from_point(
+        &self,
+        source_tag: PointTag,
+        x: u16,
+        y: u32,
+        target_tag: PointTag,
+    ) -> AnyResult<Option<PointCoordinate>> {
+        self.with_inner(|terminal| {
+            let grid_ref = match terminal.grid_ref(crate::point(source_tag, x, y)) {
+                Ok(grid_ref) => grid_ref,
+                Err(libghostty_vt::error::Error::InvalidValue) => return Ok(None),
+                Err(error) => {
+                    return Err(anyhow::Error::new(error))
+                        .context("failed to resolve ghostty grid ref");
+                }
+            };
+
+            terminal
+                .point_from_grid_ref(&grid_ref, crate::point_tag(target_tag))
+                .context("failed to convert ghostty grid ref back to coordinates")
+        })
+    }
+
     /// Format terminal contents.
     pub fn format(&self, options: FormatterOptions) -> AnyResult<String> {
         self.with_inner(|terminal| {
@@ -1128,6 +1152,17 @@ pub fn point(tag: PointTag, x: u16, y: u32) -> libghostty_vt::terminal::Point {
         PointTag::Viewport => libghostty_vt::terminal::Point::Viewport(coordinate),
         PointTag::Screen => libghostty_vt::terminal::Point::Screen(coordinate),
         PointTag::History => libghostty_vt::terminal::Point::History(coordinate),
+    }
+}
+
+/// Convert a compatibility point tag into a wrapper point tag.
+#[must_use]
+pub fn point_tag(tag: PointTag) -> libghostty_vt::terminal::PointTag {
+    match tag {
+        PointTag::Active => libghostty_vt::terminal::PointTag::Active,
+        PointTag::Viewport => libghostty_vt::terminal::PointTag::Viewport,
+        PointTag::Screen => libghostty_vt::terminal::PointTag::Screen,
+        PointTag::History => libghostty_vt::terminal::PointTag::History,
     }
 }
 
@@ -2301,9 +2336,9 @@ mod tests {
         FocusEvent, InstallOptions, KEY_A, KEY_ARROW_UP, KEY_C, KEY_DIGIT_0, KEY_MINUS, KEY_SLASH,
         KEY_UNIDENTIFIED, KeyAction, KeyEncoder, KeyEvent, MODIFIER_CONTROL, MouseAction,
         MouseButton, MouseEncoder, MouseEncoderSize, MouseEvent, MouseFormat, MouseTrackingMode,
-        PointTag, RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect, Screen, Terminal,
-        TerminalOptions, build_info, encode_focus, initialize_runtime, key_from_name,
-        runtime_sanity_check,
+        PointCoordinate, PointTag, RenderDirty, RenderState, RowSemanticPrompt, RuntimeEffect,
+        Screen, Terminal, TerminalOptions, build_info, encode_focus, initialize_runtime,
+        key_from_name, runtime_sanity_check,
     };
     fn install_callbacks() -> Terminal {
         Terminal::new_with_install_options(
@@ -2438,6 +2473,17 @@ mod tests {
         assert!(!row.wrap_continuation);
         assert_eq!(row.semantic_prompt, RowSemanticPrompt::None);
         assert_eq!(cell.codepoint, Some(u32::from('p')));
+    }
+
+    #[test]
+    fn point_from_point_roundtrips_screen_coordinates() {
+        let terminal = install_callbacks();
+        terminal.vt_write(b"alpha\r\nbeta\r\n");
+
+        let point = terminal
+            .point_from_point(PointTag::Screen, 2, 1, PointTag::Screen)
+            .expect("point conversion");
+        assert_eq!(point, Some(PointCoordinate::new(2, 1)));
     }
 
     #[test]

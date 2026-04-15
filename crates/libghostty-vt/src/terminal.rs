@@ -257,6 +257,27 @@ impl<'alloc: 'cb, 'cb> Terminal<'alloc, 'cb> {
         Ok(unsafe { GridRef::from_raw(grid_ref) })
     }
 
+    /// Convert a grid reference back into coordinates in the requested space.
+    ///
+    /// Returns `Ok(None)` when the grid reference cannot be expressed in the
+    /// requested coordinate space.
+    pub fn point_from_grid_ref(
+        &self,
+        grid_ref: &GridRef<'_>,
+        tag: PointTag,
+    ) -> Result<Option<PointCoordinate>> {
+        let mut point = MaybeUninit::<ffi::PointCoordinate>::zeroed();
+        let result = unsafe {
+            ffi::ghostty_terminal_point_from_grid_ref(
+                self.inner.as_raw(),
+                std::ptr::from_ref(&grid_ref.inner),
+                tag.into(),
+                point.as_mut_ptr(),
+            )
+        };
+        from_optional_result(result, point).map(|point| point.map(Into::into))
+    }
+
     /// Get the current value of a terminal mode.
     pub fn mode(&self, mode: Mode) -> Result<bool> {
         let mut value = false;
@@ -668,6 +689,19 @@ pub enum Point {
     History(PointCoordinate),
 }
 
+/// Coordinate-space tag used for point conversions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointTag {
+    /// Active area where the cursor can move.
+    Active,
+    /// Visible viewport (changes when scrolled).
+    Viewport,
+    /// Full screen including scrollback.
+    Screen,
+    /// Scrollback history only (before active area).
+    History,
+}
+
 impl From<Point> for ffi::Point {
     fn from(value: Point) -> Self {
         match value {
@@ -695,6 +729,17 @@ impl From<Point> for ffi::Point {
                     coordinate: coord.into(),
                 },
             },
+        }
+    }
+}
+
+impl From<PointTag> for ffi::PointTag::Type {
+    fn from(value: PointTag) -> Self {
+        match value {
+            PointTag::Active => ffi::PointTag::ACTIVE,
+            PointTag::Viewport => ffi::PointTag::VIEWPORT,
+            PointTag::Screen => ffi::PointTag::SCREEN,
+            PointTag::History => ffi::PointTag::HISTORY,
         }
     }
 }
@@ -860,7 +905,7 @@ impl From<ScrollViewport> for ffi::TerminalScrollViewport {
 
 #[cfg(test)]
 mod tests {
-    use super::{Options, PointCoordinate, SelectionPoint, Terminal};
+    use super::{Options, Point, PointCoordinate, PointTag, SelectionPoint, Terminal};
 
     fn build_terminal() -> Terminal<'static, 'static> {
         Terminal::new(Options {
@@ -908,6 +953,22 @@ mod tests {
             .hyperlink_uri_at_screen(PointCoordinate::new(0, 0))
             .expect("hyperlink query");
         assert_eq!(uri.as_deref(), Some("https://example.com"));
+    }
+
+    #[test]
+    fn point_from_grid_ref_roundtrips_screen_coordinates() {
+        let mut terminal = build_terminal();
+        terminal.vt_write(b"alpha\r\nbeta\r\n");
+
+        let point = PointCoordinate::new(2, 1);
+        let grid_ref = terminal
+            .grid_ref(Point::Screen(point))
+            .expect("resolve grid ref");
+
+        let roundtrip = terminal
+            .point_from_grid_ref(&grid_ref, PointTag::Screen)
+            .expect("roundtrip point");
+        assert_eq!(roundtrip, Some(point));
     }
 }
 
