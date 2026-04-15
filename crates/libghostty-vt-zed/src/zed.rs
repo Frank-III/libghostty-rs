@@ -584,11 +584,12 @@ impl FormatterOptions {
         }
     }
 
-    fn into_wrapper(self) -> libghostty_vt::fmt::FormatterOptions {
+    fn into_wrapper(self) -> libghostty_vt::fmt::FormatterOptions<'static> {
         libghostty_vt::fmt::FormatterOptions {
             format: self.format.into(),
             trim: self.trim,
             unwrap: self.unwrap,
+            selection: None,
         }
     }
 }
@@ -738,6 +739,7 @@ impl Terminal {
         self.with_inner_mut(|terminal| {
             terminal
                 .set_mode(mode_from_raw(mode), enabled)
+                .map(|_| ())
                 .context("failed to set ghostty terminal mode")
         })
     }
