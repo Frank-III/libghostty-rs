@@ -33,13 +33,4 @@ unsafe extern "C" {
         out_buf_len: usize,
         out_len: *mut usize,
     ) -> Result::Type;
-
-    pub fn ghostty_terminal_hyperlink_uri_at(
-        terminal: Terminal,
-        x: u16,
-        y: u32,
-        out_buf: *mut u8,
-        out_buf_len: usize,
-        out_len: *mut usize,
-    ) -> Result::Type;
 }

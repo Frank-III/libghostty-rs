@@ -8,7 +8,7 @@ const Result = @import("result.zig").Result;
 const size = @import("../size.zig");
 
 // This patch is copied into Ghostty's checkout at build time so downstream
-// consumers can rely on these C hooks until upstream exports them from:
+// consumers can rely on the search/selection C hooks until upstream exports them from:
 // - src/terminal/c/main.zig
 // - src/lib_vt.zig
 
@@ -134,43 +134,5 @@ pub fn terminal_selection_string(
     if (out_buf == null or out_buf_len < text.len) return .out_of_space;
 
     @memcpy(out_buf.?[0..text.len], text[0..text.len]);
-    return .success;
-}
-
-pub fn terminal_hyperlink_uri_at(
-    terminal_: terminal_c.Terminal,
-    x: size.CellCountInt,
-    y: u32,
-    out_buf: ?[*]u8,
-    out_buf_len: usize,
-    out_len: *usize,
-) callconv(.c) Result {
-    const terminal_handle = terminal_ orelse return .invalid_value;
-    const terminal = if (comptime @hasField(@TypeOf(terminal_handle.*), "terminal"))
-        terminal_handle.terminal
-    else
-        terminal_handle;
-    const pin = terminal.screens.active.pages.pin(.{
-        .screen = .{ .x = x, .y = y },
-    }) orelse return .invalid_value;
-    const row_and_cell = pin.rowAndCell();
-    if (!row_and_cell.cell.hyperlink) {
-        out_len.* = 0;
-        return .success;
-    }
-
-    const page_data = pin.node.data;
-    const cell_offset = size.getOffset(page.Cell, page_data.memory, row_and_cell.cell);
-    const hyperlink_id = page_data.hyperlink_map.map(page_data.memory).get(cell_offset) orelse {
-        out_len.* = 0;
-        return .success;
-    };
-    const hyperlink_entry = page_data.hyperlink_set.get(page_data.memory, hyperlink_id);
-    const uri = hyperlink_entry.uri.slice(page_data.memory);
-
-    out_len.* = uri.len;
-    if (out_buf == null or out_buf_len < uri.len) return .out_of_space;
-
-    @memcpy(out_buf.?[0..uri.len], uri);
     return .success;
 }

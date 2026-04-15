@@ -4,7 +4,7 @@ use std::process::Command;
 
 /// Pinned ghostty commit. Update this to pull a newer version.
 const GHOSTTY_REPO: &str = "https://github.com/ghostty-org/ghostty.git";
-const GHOSTTY_COMMIT: &str = "6057f8d2b75631937fa7c2fc240a8bbe9137176f";
+const GHOSTTY_COMMIT: &str = "a1e75daef8b64426dbca551c6e41b1fbc2b7ae24";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=LIBGHOSTTY_VT_SYS_SKIP_NATIVE_BUILD");
@@ -333,7 +333,6 @@ fn patch_ghostty_source(checkout_dir: &Path, sys_crate_dir: &Path) {
         "pub const search = @import(\"search.zig\");\n",
         "pub const terminal_search_matches = search.terminal_search_matches;\n",
         "pub const terminal_selection_string = search.terminal_selection_string;\n",
-        "pub const terminal_hyperlink_uri_at = search.terminal_hyperlink_uri_at;\n",
         "    _ = search;\n",
     ] {
         while main_zig.contains(injected) {
@@ -356,7 +355,6 @@ fn patch_ghostty_source(checkout_dir: &Path, sys_crate_dir: &Path) {
         concat_lines(&[
             "pub const terminal_search_matches = search.terminal_search_matches;",
             "pub const terminal_selection_string = search.terminal_selection_string;",
-            "pub const terminal_hyperlink_uri_at = search.terminal_hyperlink_uri_at;",
         ]),
         "terminal/c/main.zig search export",
     );
@@ -372,7 +370,6 @@ fn patch_ghostty_source(checkout_dir: &Path, sys_crate_dir: &Path) {
     for injected in [
         "        @export(&c.terminal_search_matches, .{ .name = \"ghostty_terminal_search_matches\" });\n",
         "        @export(&c.terminal_selection_string, .{ .name = \"ghostty_terminal_selection_string\" });\n",
-        "        @export(&c.terminal_hyperlink_uri_at, .{ .name = \"ghostty_terminal_hyperlink_uri_at\" });\n",
     ] {
         while lib_vt.contains(injected) {
             lib_vt = lib_vt.replacen(injected, "", 1);
@@ -385,7 +382,6 @@ fn patch_ghostty_source(checkout_dir: &Path, sys_crate_dir: &Path) {
         concat_lines(&[
             "        @export(&c.terminal_search_matches, .{ .name = \"ghostty_terminal_search_matches\" });",
             "        @export(&c.terminal_selection_string, .{ .name = \"ghostty_terminal_selection_string\" });",
-            "        @export(&c.terminal_hyperlink_uri_at, .{ .name = \"ghostty_terminal_hyperlink_uri_at\" });",
         ]),
         "lib_vt.zig terminal search export",
     );
@@ -425,10 +421,8 @@ fn concat_lines(lines: &[&str]) -> String {
 
 fn has_upstream_search_exports(main_zig: &str, lib_vt: &str) -> bool {
     let has_main_exports = main_zig.contains("pub const terminal_search_matches")
-        && main_zig.contains("pub const terminal_selection_string")
-        && main_zig.contains("pub const terminal_hyperlink_uri_at");
+        && main_zig.contains("pub const terminal_selection_string");
     let has_lib_exports = lib_vt.contains("ghostty_terminal_search_matches")
-        && lib_vt.contains("ghostty_terminal_selection_string")
-        && lib_vt.contains("ghostty_terminal_hyperlink_uri_at");
+        && lib_vt.contains("ghostty_terminal_selection_string");
     has_main_exports && has_lib_exports
 }

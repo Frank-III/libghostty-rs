@@ -42,6 +42,7 @@ pub mod error;
 pub mod fmt;
 pub mod focus;
 pub mod key;
+pub mod kitty;
 pub mod mouse;
 pub mod osc;
 pub mod paste;
@@ -58,3 +59,8 @@ pub use crate::{
     render::RenderState,
     terminal::{Options as TerminalOptions, Terminal},
 };
+
+pub(crate) fn sys_set<T>(opt: ffi::SysOption::Type, val: *const T) -> error::Result<()> {
+    let result = unsafe { ffi::ghostty_sys_set(opt, val.cast()) };
+    error::from_result(result)
+}
